@@ -106,7 +106,7 @@ def _health(value: dict, binding: dict, horizon: str, session: date) -> Strategy
              and value['session'] == session and value['policy_id'] == binding['horizon_policies'][horizon],
              'health identity mismatch')
     _require(type(value['strategy']) is str and value['strategy'] in binding['strategies']
-             and type(value['status']) is str and value['status'] in get_args(HealthStatus),
+             and type(value['status']) is str and value['status'] in (set(get_args(HealthStatus)) | {'unavailable'}),
              'health classification invalid')
     _require(type(value['signal_count']) is int and value['signal_count'] >= 0
              and type(value['evidence']) is dict, 'health evidence invalid')
@@ -122,7 +122,7 @@ def _receipt(store: SourceInputStore, payload: dict) -> dict:
         'binding_sha256': _digest(store, binding),
         'horizon_policies': binding['horizon_policies'],
         'counts': {horizon: {'signals': len(value['signals']), 'health': len(value['health']),
-            'failed_health': sum(record['status'] in ('data_failure', 'strategy_defect')
+            'failed_health': sum(record['status'] in ('data_failure', 'strategy_defect', 'unavailable')
                 for record in value['health'])} for horizon, value in horizons.items()},
         'horizon_sha256': {horizon: _digest(store, value) for horizon, value in horizons.items()},
         'model_coverage_sha256': _digest(store, payload['model_coverage']),

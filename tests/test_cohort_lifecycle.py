@@ -26,7 +26,6 @@ import pytest
 from tradingagents.strategies.orchestration.multi_strategy_engine import (
     MultiStrategyEngine,
 )
-from tradingagents.strategies.trading.paper_trader import PaperTrader
 from tradingagents.strategies.learning.signal_journal import SignalJournal
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.execution.price_source import (
@@ -138,55 +137,8 @@ def state(state_dir):
 
 
 @pytest.fixture
-def trader(state):
-    return PaperTrader(state)
-
-
-@pytest.fixture
 def journal(state_dir):
     return SignalJournal(state_dir)
-
-
-# ---------------------------------------------------------------------------
-# Test: PnL computed on close_trade
-# ---------------------------------------------------------------------------
-
-
-class TestPnLOnClose:
-    def test_close_trade_stores_pnl(self, trader, state):
-        """close_trade() is no longer an accounting mutation path."""
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.close_trade("trade", 110.0, "2026-03-15", "hold_period")
-
-    def test_close_trade_short_pnl(self, trader, state):
-        """Short mutation is rejected by the read-only wrapper."""
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.open_trade("fake_strat", "TSLA", "short", 200.0, "2026-03-01")
-
-    def test_close_trade_loss(self, trader, state):
-        """Long mutation is rejected by the read-only wrapper."""
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.open_trade("fake_strat", "AAPL", "long", 100.0, "2026-03-01")
-
-
-# ---------------------------------------------------------------------------
-# Test: paper_trader.check_exits triggers strategy exit rules
-# ---------------------------------------------------------------------------
-
-
-class TestCheckExits:
-    def test_hold_period_exit(self, trader, state):
-        """Trade exits after holding period."""
-        # Dates are relative to "now" so they stay inside the price window that
-        # _make_price_df anchors to datetime.now() (avoids a time-dependent test).
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.check_exits({}, {}, datetime.now().strftime("%Y-%m-%d"))
-
-    def test_stop_loss_exit(self, trader, state):
-        """Trade exits on stop loss."""
-        # Relative dates keep the check inside _make_declining_price_df's window.
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.check_exits({}, {}, datetime.now().strftime("%Y-%m-%d"))
 
 
 # ---------------------------------------------------------------------------
@@ -308,60 +260,6 @@ class TestLearningLoop:
 
 
 # ---------------------------------------------------------------------------
-# Test: Adaptive confidence diverges from fixed
-# ---------------------------------------------------------------------------
-
-
-class TestAdaptiveConfidence:
-    def test_confidence_from_journal(self, tmp_path):
-        """Adaptive engine derives confidence from governed v2 outcomes."""
-        from tradingagents.strategies.metrics.models import OutcomeRecord
-
-        state_dir = str(tmp_path / "adaptive")
-        config = {
-            "autoresearch": {"state_dir": state_dir, "total_capital": 5000},
-            "execution": {"mode": "paper"},
-        }
-        state = StateManager(state_dir)
-        outcomes = tuple(
-            OutcomeRecord(
-                outcome_id=f"outcome-{index}",
-                signal_id=f"signal-{index}",
-                event_key=f"event-{index}",
-                epoch_id="epoch-1",
-                strategy="fake_strat",
-                policy_id="policy-1",
-                ticker="AAPL",
-                direction="long",
-                holding_sessions=5,
-                entry_session=date(2026, 3, 2),
-                exit_session=date(2026, 3, 9),
-                entry_price=Decimal("100"),
-                exit_price=Decimal("105" if index < 12 else "95"),
-                raw_return=Decimal("0.05" if index < 12 else "-0.05"),
-                signed_return=Decimal("0.05" if index < 12 else "-0.05"),
-                status="valid",
-                invalid_reason="",
-            )
-            for index in range(15)
-        )
-        engine = MultiStrategyEngine(
-            config=config,
-            strategies=[FakeStrategy()],
-            state_manager=state,
-            use_llm=False,
-            outcome_reader=lambda strategy: (
-                outcomes if strategy == "fake_strat" else ()
-            ),
-        )
-
-        conf = engine._compute_strategy_confidence("fake_strat")
-        assert conf > 0.5  # 80% hit rate should give above-average confidence
-
-        assert engine._adaptive_confidence is False
-
-
-# ---------------------------------------------------------------------------
 # Test: Full 30-day multi-day simulation
 # ---------------------------------------------------------------------------
 
@@ -424,7 +322,7 @@ class TestMultiDaySimulation:
             (("AAPL", "MSFT"), session),
         ]
         assert all(
-            cohort["engine"]._adaptive_confidence is False
+            not hasattr(cohort["engine"], "_adaptive_confidence")
             and cohort["config"].learning_policy.mode == "disabled"
             for cohort in orchestrator.cohorts
         )
@@ -1458,7 +1356,7 @@ class TestCandidateBarLifecycle:
             with sqlite3.connect(orchestrator._metric_store.path) as connection:
                 payload = json.loads(
                     connection.execute(
-                        "SELECT payload_json FROM candidate_bar_recoveries "
+                        "SELECT payload_json FROM bar_recoveries "
                         "WHERE recovery_id = ?",
                         (recovery.recovery_id,),
                     ).fetchone()[0]
@@ -1475,7 +1373,7 @@ class TestCandidateBarLifecycle:
                 else:
                     final_attempt["fetched_at"] = "2026-03-31 19:00:00+00:00"
                 connection.execute(
-                    "UPDATE candidate_bar_recoveries SET payload_json = ? "
+                    "UPDATE bar_recoveries SET payload_json = ? "
                     "WHERE recovery_id = ?",
                     (
                         json.dumps(payload, sort_keys=True, separators=(",", ":")),
@@ -1546,11 +1444,16 @@ class TestCandidateBarLifecycle:
             durable_candidate_payloads = " ".join(
                 row[0]
                 for table in (
-                    "candidate_bar_recoveries",
+                    "bar_recoveries",
                     "candidate_input_issues",
-                    "candidate_signal_identity_bindings",
                 )
                 for row in connection.execute(f"SELECT payload_json FROM {table}")
+            ) + " " + " ".join(
+                str(value)
+                for row in connection.execute(
+                    "SELECT horizon, ticker, event_key, strategy FROM candidate_signal_identity_rows"
+                )
+                for value in row
             )
         assert sentinel not in durable_candidate_payloads
         assert orchestrator._metric_store.load_epoch(orchestrator._epoch_id).status == "open"
@@ -1653,24 +1556,15 @@ class TestCandidateBarLifecycle:
             ).canonical_payload()
             with sqlite3.connect(orchestrator._metric_store.path) as connection:
                 row = connection.execute(
-                    "SELECT binding_id, payload_json "
+                    "SELECT binding_id "
                     "FROM candidate_signal_identity_bindings "
                     "WHERE epoch_id = ? AND session = ?",
                     (orchestrator._epoch_id, session.isoformat()),
                 ).fetchone()
-                binding = json.loads(row[1])
-                binding["identities"] = [
-                    identity
-                    for identity in binding["identities"]
-                    if identity["ticker"] != "ALX"
-                ]
                 connection.execute(
-                    "UPDATE candidate_signal_identity_bindings SET payload_json = ? "
-                    "WHERE binding_id = ?",
-                    (
-                        json.dumps(binding, sort_keys=True, separators=(",", ":")),
-                        row[0],
-                    ),
+                    "DELETE FROM candidate_signal_identity_rows "
+                    "WHERE binding_id = ? AND ticker = ?",
+                    (row[0], "ALX"),
                 )
             candidate_calls = len(source.candidate_calls)
             source.resolve_candidate_daily_bars = (

@@ -165,7 +165,7 @@ def test_initialize_clean_creates_only_opening_cash_and_empty_economics(tmp_path
         connection = sqlite3.connect(db)
         try:
             cohort_id = connection.execute(
-                "SELECT metadata_value FROM schema_metadata WHERE metadata_key='cohort_id'"
+                "SELECT cohort_id FROM accounting_state"
             ).fetchone()[0]
             opening = connection.execute(
                 "SELECT amount FROM cash_events WHERE event_type='opening'"
@@ -202,8 +202,7 @@ def test_initialize_clean_is_idempotent_but_wrong_existing_ledger_fails_closed(
     try:
         if tamper == "cohort":
             connection.execute(
-                "UPDATE schema_metadata SET metadata_value='wrong-cohort' "
-                "WHERE metadata_key='cohort_id'"
+                "UPDATE accounting_state SET cohort_id='wrong-cohort'"
             )
         else:
             connection.execute(
@@ -254,8 +253,8 @@ def test_initialize_clean_rejects_any_non_bootstrap_ledger_state(tmp_path, tampe
             # metric_epochs is intentionally outside the old short
             # _ECONOMIC_TABLES list, proving future/history tables fail closed.
             connection.execute(
-                "INSERT INTO metric_epochs VALUES (?, ?, ?, ?, ?, ?)",
-                ("unexpected-epoch", "gen-test", 1, "active", "2026-07-31", None),
+                "INSERT INTO metric_epochs VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ("unexpected-epoch", "gen-test", 1, "active", "2026-07-31", None, "{}"),
             )
         connection.commit()
     finally:
@@ -396,8 +395,8 @@ def test_initialize_clean_consults_paired_live_wal_and_rejects_hidden_history(
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA wal_autocheckpoint=0")
         connection.execute(
-            "INSERT INTO metric_epochs VALUES (?, ?, ?, ?, ?, ?)",
-            ("hidden-epoch", "gen-test", 1, "active", "2026-07-31", None),
+            "INSERT INTO metric_epochs VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("hidden-epoch", "gen-test", 1, "active", "2026-07-31", None, "{}"),
         )
         connection.commit()
         assert Path(f"{database}-wal").stat().st_size > 0

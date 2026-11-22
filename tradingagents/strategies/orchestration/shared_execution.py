@@ -45,7 +45,9 @@ PREPARED = {'required_tickers', 'market', 'config', 'borrow', 'provenance', 'vol
 
 
 def configured(owner):
-    return owner._base_config.get('autoresearch', {}).get('stabilization_profile_policy') == POLICY
+    from .operating_contract import POLICY as GEN003_POLICY
+
+    return owner._base_config.get('autoresearch', {}).get('stabilization_profile_policy') in {POLICY, GEN003_POLICY}
 
 
 def _fields(document, allowed):
@@ -332,6 +334,7 @@ def validate_shared_execution(owner, payload, session, epoch_id):
         raise SourceInputError('shared execution sealed roster invalid')
     plans = []
     all_scopes = set()
+    all_unbound = all(c['ledger'].session_execution_context(session) is None for c in cohorts)
     for cohort in cohorts:
         executor, ledger = cohort['executor'], cohort['ledger']
         book = payload['books'][cohort['config'].name]
@@ -344,7 +347,7 @@ def validate_shared_execution(owner, payload, session, epoch_id):
                 or book['benchmarks'] != tuple(sorted(executor.benchmark_symbols))
                 or book['scope'] != tuple(sorted(set(prepared['required_tickers']) | set(executor.benchmark_symbols)))
                 or ledger.session_invalid_reason(session)
-                or ledger.connection.execute('SELECT 1 FROM session_execution_contexts WHERE session > ? LIMIT 1', (session.isoformat(),)).fetchone()):
+                or ledger.connection.execute('SELECT 1 FROM session_execution_contexts WHERE cohort_id=? AND session > ? LIMIT 1', (ledger.cohort_id, session.isoformat())).fetchone()):
             raise SourceInputError('shared execution book identity invalid')
         if (book['starting_state_digest'] != stable_id('session_governed_state', book['starting_state'])
                 or book['precondition_digest'] != _digest({'starting_state': book['starting_state'], 'overdue': book['overdue']})
@@ -358,10 +361,25 @@ def validate_shared_execution(owner, payload, session, epoch_id):
         context = ledger.session_execution_context(session)
         if context is None:
             # No phase, staging, snapshot or accounting may precede the context.
-            for table in ('session_phases', 'staging_runs', 'account_snapshots', 'session_runs', 'fills', 'cash_events',
-                          'marks', 'borrow_accruals', 'financing_accruals', 'dividend_events', 'fee_events', 'benchmark_observations'):
-                if ledger.connection.execute('SELECT 1 FROM '+table+' WHERE session=? LIMIT 1', (session.isoformat(),)).fetchone():
+            for table in ('session_phases', 'staging_runs', 'account_snapshots', 'session_runs',
+                          'fills', 'cash_events', 'borrow_accruals', 'financing_accruals'):
+                if ledger.connection.execute(
+                    f'SELECT 1 FROM {table} WHERE cohort_id=? AND session=? LIMIT 1',
+                    (ledger.cohort_id, session.isoformat()),
+                ).fetchone():
                     raise SourceInputError('shared execution unbound effects present')
+            if ledger.connection.execute(
+                'SELECT 1 FROM fee_events f JOIN fills fi ON fi.fill_id=f.fill_id WHERE fi.cohort_id=? AND f.session=? LIMIT 1',
+                (ledger.cohort_id, session.isoformat()),
+            ).fetchone():
+                raise SourceInputError('shared execution unbound effects present')
+            if all_unbound:
+                for table, col in (('marks', 'session'), ('benchmark_observations', 'session'), ('dividend_events', 'ex_session')):
+                    if ledger.connection.execute(
+                        f'SELECT 1 FROM {table} WHERE {col}=? LIMIT 1',
+                        (session.isoformat(),),
+                    ).fetchone():
+                        raise SourceInputError('shared execution unbound effects present')
             validate_unbound_precondition(ledger, session, book)
             current, _ = executor.prepare_execution_context(session, epoch_id, scoped, rates, payload['accepted_at'])
             if current != prepared:

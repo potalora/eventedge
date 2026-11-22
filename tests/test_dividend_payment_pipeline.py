@@ -27,8 +27,14 @@ def test_shared_pipeline_enriches_closed_symbol_once_and_preserves_replay(tmp_pa
     source.enrich_dividend_payment_terms = enrich
     try:
         for cohort in orch.cohorts:
-            seed(cohort['ledger'])
-            intent(cohort['ledger'], 'close', side='sell')
+            prefix = cohort['config'].name + '-'
+            from tradingagents.strategies.execution import Fill
+            from tradingagents.strategies.orchestration.trading_calendar import session_open
+            from test_execution_audit_repairs import THU, FRI, bar
+            seed_order = intent(cohort['ledger'], prefix + 'seed-AAPL', 'AAPL', 'buy', 10, THU, FRI)
+            cohort['ledger'].apply_fill(seed_order, Fill('f-' + prefix + 'AAPL', seed_order.intent_id, 'buy', FRI, session_open(FRI), at(FRI), Decimal('100'), Decimal('100'), 10, Decimal(0), Decimal(0), Decimal(0)))
+            cohort['ledger'].mark(FRI, {'AAPL': bar('AAPL', FRI)}, 'epoch', at(FRI))
+            intent(cohort['ledger'], prefix + 'close', side='sell')
         first = orch.run_daily(MON.isoformat())
         assert all(row['execution_valid'] for row in first.values()), first
         assert all(not cohort['ledger'].open_exit_positions() for cohort in orch.cohorts)

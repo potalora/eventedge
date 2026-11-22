@@ -43,7 +43,7 @@ def test_persist_run_evidence_creates_unique_immutable_files(tmp_path):
     assert json.loads(first_bytes) == _evidence()
 
 
-def test_persist_run_evidence_redacts_credentials_and_restricts_mode(
+def test_persist_run_evidence_redacts_log_text_only_and_restricts_mode(
     tmp_path, monkeypatch
 ):
     env_secret = "environment-secret-value"
@@ -59,12 +59,18 @@ def test_persist_run_evidence_redacts_credentials_and_restricts_mode(
             ),
             "stderr": "password=stderr-secret",
             "result": {
-                "error": "token=result-secret",
-                "nested": {"access_token": "structured-secret"},
+                "outcome": "clean",
+                "success": True,
+                "flag": "true",
+                "nested": {"count": 1234, "empty": None},
             },
         }
     )
-    monkeypatch.setenv("PROVIDER_API_KEY", env_secret)
+    monkeypatch.setenv("OPENAI_API_KEY", env_secret)
+    # Short or non-allowlisted env vars must never redact booleans/null/short words.
+    monkeypatch.setenv("FINNHUB_API_KEY", "true")
+    monkeypatch.setenv("RANDOM_TOKEN", "false")
+    monkeypatch.setenv("UNLISTED_SECRET_VAR", "should-not-corrupt-text")
 
     path = persist_run_evidence(tmp_path, evidence)
     raw = path.read_text()
@@ -78,14 +84,24 @@ def test_persist_run_evidence_redacts_credentials_and_restricts_mode(
         "url-password",
         "query-secret",
         "stderr-secret",
-        "result-secret",
-        "structured-secret",
     ):
-        assert secret not in raw
-    assert raw.count("<redacted>") >= 8
-    assert payload["result"]["nested"]["access_token"] == "<redacted>"
+        assert secret not in payload["stdout"]
+        assert secret not in payload["stderr"]
+    assert payload["stdout"].count("<redacted>") >= 5
+    assert payload["stderr"] == "password=<redacted>"
+    # Structured result JSON is preserved verbatim (never corrupted by log redaction).
+    assert payload["result"] == evidence["result"]
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert "environment" not in payload
+
+
+def test_short_secret_values_and_literals_are_never_redacted(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "true")
+    monkeypatch.setenv("ALPACA_SECRET_KEY", "false")
+    monkeypatch.setenv("FRED_API_KEY", "null")
+    monkeypatch.setenv("FINNHUB_API_KEY", "1234567")  # < 8 chars
+    text = '{"ok": true, "failed": false, "value": null, "id": 1234567}'
+    assert sanitize_evidence_text(text) == text
 
 
 def test_persist_run_evidence_accepts_timeout_byte_streams(tmp_path):

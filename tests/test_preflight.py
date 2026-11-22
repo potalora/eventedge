@@ -1719,3 +1719,71 @@ def test_run_generations_method_lock_invalid_is_bounded_without_traceback(
         "success": False,
     }
     assert "Traceback" not in captured.err
+
+
+def test_preflight_stages_numeric_surprise_only_earnings_candidates(tmp_path, monkeypatch):
+    from tradingagents.strategies.orchestration.data_acquisition import (
+        DataAcquisitionService,
+    )
+    from tradingagents.strategies.orchestration.preflight import run_preflight
+
+    class _FakeFinnhub:
+        name = "finnhub"
+
+        def is_available(self):
+            return True
+
+        def new_workflow_deadline(self, max_budget_s=None):
+            return 9999999999.0
+
+        def fetch_recent_earnings(self, date_from, date_to, deadline=None):
+            return [
+                {
+                    "symbol": "GOAI",
+                    "date": "2026-11-19",
+                    "hour": "amc",
+                    "year": 2026,
+                    "quarter": 3,
+                    "epsActual": 1.25,
+                    "epsEstimate": 1.00,
+                },
+                {
+                    "symbol": "CEPL",
+                    "date": "2026-11-20",
+                    "hour": "bmo",
+                    "year": 2026,
+                    "quarter": 3,
+                    "epsActual": 0.40,
+                    "epsEstimate": 0.50,
+                },
+            ]
+
+        def fetch_earnings_news(self, symbol, edate, deadline=None):
+            return []
+
+        def fetch_company_news(self, symbol, date_from, date_to, deadline=None):
+            return []
+
+        def fetch_supply_chains(self, symbols, deadline=None):
+            return {}
+
+    config, engine = _make_engine(tmp_path)
+    config["autoresearch"]["supply_chain_universe"] = ["AAPL"]
+    registry = MagicMock()
+    registry.get.side_effect = lambda key: _FakeFinnhub() if key == "finnhub" else None
+    svc = DataAcquisitionService(config, registry=registry)
+    finnhub_payload = svc.fetch_finnhub_data("2026-11-20")
+    monkeypatch.setattr(
+        engine,
+        "_fetch_all_data",
+        lambda start, end, **kwargs: {"finnhub": finnhub_payload},
+    )
+
+    report = run_preflight(config, "2026-11-20", engine=engine, mode="screen")
+    assert report["ok"] is True, report["failures"]
+    assert report["failures"] == []
+    for horizon in ("30d", "3m", "6m", "1y"):
+        ec = report["horizons"][horizon]["earnings_call"]
+        assert ec["candidates"] == 2
+        assert ec["staged"] == 2
+        assert ec["errors"] == []

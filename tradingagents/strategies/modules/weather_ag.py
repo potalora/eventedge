@@ -50,21 +50,13 @@ AG_TICKERS_FULL = {
 # Winter subset (Oct-Mar): skip corn/soy-specific + seasonal-only instruments
 AG_TICKERS_WINTER = {"weat", "dba", "moo", "adm", "bg", "pep", "ko", "gis", "mdlz"}
 
-# Industries for dynamic OpenBB expansion
-AG_EXPANSION_INDUSTRIES = [
-    "Agricultural Products",
-    "Packaged Foods",
-    "Farm & Heavy Construction Machinery",
-    "Agricultural Inputs",
-]
-
 
 class WeatherAgStrategy:
     """Trade agricultural instruments based on multi-source supply disruption signals."""
 
     name = "weather_ag"
     track = "paper_trade"
-    data_sources = ["yfinance", "noaa", "usda", "drought_monitor", "openbb"]
+    data_sources = ["yfinance", "noaa", "usda", "drought_monitor"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -129,9 +121,47 @@ class WeatherAgStrategy:
                 crop: [row for row in weeks if isinstance(row, dict) and str(row.get("week_ending", ""))[:10] <= date]
                 for crop, weeks in usda_data.get("crop_progress", {}).items() if isinstance(weeks, list)
             }
-        complete_environment = all(isinstance(source, dict) and source and "error" not in source for source in (noaa_data, drought_data, usda_data))
-        complete_environment = complete_environment and bool(usda_data.get("crop_progress")) and bool(drought_data.get("states"))
-        complete_environment = complete_environment and all(source.get("coverage", {}).get("complete", True) is not False for source in (noaa_data, drought_data, usda_data))
+        noaa_off_season_skipped = (
+            isinstance(noaa_data, dict)
+            and bool(noaa_data.get("off_season_skipped"))
+            and "error" not in noaa_data
+        )
+        if is_growing_season:
+            noaa_ok = (
+                isinstance(noaa_data, dict)
+                and bool(noaa_data)
+                and "error" not in noaa_data
+                and not noaa_off_season_skipped
+                and noaa_data.get("coverage", {}).get("complete", True) is not False
+            )
+        else:
+            # Oct-Mar off-season: NOAA is intentionally skipped by NOAAYearlySource
+            noaa_ok = (
+                isinstance(noaa_data, dict)
+                and "error" not in noaa_data
+                and (
+                    noaa_off_season_skipped
+                    or (
+                        bool(noaa_data)
+                        and noaa_data.get("coverage", {}).get("complete", True) is not False
+                    )
+                )
+            )
+        drought_ok = (
+            isinstance(drought_data, dict)
+            and bool(drought_data)
+            and "error" not in drought_data
+            and bool(drought_data.get("states"))
+            and drought_data.get("coverage", {}).get("complete", True) is not False
+        )
+        usda_ok = (
+            isinstance(usda_data, dict)
+            and bool(usda_data)
+            and "error" not in usda_data
+            and bool(usda_data.get("crop_progress"))
+            and usda_data.get("coverage", {}).get("complete", True) is not False
+        )
+        complete_environment = noaa_ok and drought_ok and usda_ok
 
         # --- Gate check: is anything interesting happening? ---
         gate_triggered = False
@@ -152,7 +182,12 @@ class WeatherAgStrategy:
             gate_reasons.append(f"crop_decline={crop_decline}pp")
 
         # NOAA weather gate (growing season only)
-        if is_growing_season and noaa_data and "error" not in noaa_data:
+        if (
+            is_growing_season
+            and noaa_data
+            and "error" not in noaa_data
+            and not noaa_off_season_skipped
+        ):
             heat_days = noaa_data.get("heat_stress_days")
             precip_deficit = noaa_data.get("precip_deficit_pct")
             frost_events = noaa_data.get("frost_events")
@@ -202,6 +237,7 @@ class WeatherAgStrategy:
             "noaa_data": {k: v for k, v in noaa_data.items() if k != "error"}
             if noaa_data
             else {},
+            "noaa_off_season_skipped": noaa_off_season_skipped,
             "usda_data": usda_data if usda_data else {},
             "is_growing_season": is_growing_season,
             "gate_reasons": gate_reasons,
@@ -236,6 +272,7 @@ class WeatherAgStrategy:
                     date=date,
                     direction="long",
                     score=0.5,  # LLM will adjust
+                    raw_signal_score=0.5,
                     journal_only=not complete_environment,
                     metadata={
                         **({"non_actionable_reason": "incomplete_environmental_inputs"} if not complete_environment else {}),
@@ -309,23 +346,6 @@ Recent results:
 {results_text or "  No results yet."}
 
 Suggest 3 new parameter combinations. Return JSON array of 3 param dicts."""
-
-    def get_universe(self, openbb_source=None) -> dict[str, str]:
-        """Return eligible ticker universe, optionally expanded via OpenBB."""
-        universe = dict(AG_TICKERS_FULL)
-        if openbb_source and openbb_source.is_available():
-            for industry in AG_EXPANSION_INDUSTRIES:
-                result = openbb_source.fetch(
-                    {
-                        "method": "sector_tickers",
-                        "industry": industry,
-                    }
-                )
-                tickers = result.get("tickers", [])
-                for t in tickers:
-                    universe[t.lower()] = t
-        blocked = set()  # Populated from config at engine level
-        return {k: v for k, v in universe.items() if v not in blocked}
 
     @staticmethod
     def _check_crop_decline(usda_data: dict) -> float:

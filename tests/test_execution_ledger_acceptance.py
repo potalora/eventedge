@@ -9,8 +9,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from tradingagents.execution import alpaca_broker as alpaca_module
-from tradingagents.execution.alpaca_broker import AlpacaBroker
 from tradingagents.strategies.execution import (
     CorporateAction,
     Fill,
@@ -27,7 +25,6 @@ from tradingagents.strategies.orchestration.trading_calendar import (
     session_close,
     session_open,
 )
-from tradingagents.strategies.state.compatibility_projection import project_all
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 from tradingagents.strategies.state.state import StateManager
 from tradingagents.strategies.trading.execution_bridge import ExecutionBridge
@@ -54,9 +51,7 @@ CASES = (
     "missing_mark_invalidates_without_zero_pnl",
     "transaction_crash_rolls_back",
     "rerun_does_not_duplicate_economic_effects",
-    "unresolved_external_order_reconciles_before_retry",
     "split_and_directional_dividend_apply_once",
-    "compatibility_json_matches_ledger",
 )
 
 
@@ -970,7 +965,7 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
                 ("short", 2, 2, "49.950"),
             ]
             dividends = ledger.connection.execute(
-                "SELECT direction, amount FROM dividend_events ORDER BY direction"
+                "SELECT direction, amount FROM dividend_receivables ORDER BY direction"
             ).fetchall()
             assert [
                 (row[0], Decimal(row[1])) for row in dividends

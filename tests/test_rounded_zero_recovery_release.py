@@ -43,8 +43,8 @@ def _files(root):
     # WAL or changed database/evidence bytes must still fail preservation.
     return {str(path.relative_to(root)): path.read_bytes()
             for path in root.rglob("*") if path.is_file()
-            and not path.name.endswith(".db-shm")
-            and not (path.name.endswith(".db-wal") and path.stat().st_size == 0)}
+            and not path.name.endswith((".db-shm", ".sqlite3-shm"))
+            and not (path.name.endswith((".db-wal", ".sqlite3-wal")) and path.stat().st_size == 0)}
 
 
 def _tick(repo, now, **kwargs):
@@ -63,7 +63,7 @@ def release_rehearsal(tmp_path, monkeypatch):
         check=True, capture_output=True,
     )
     _git(repo, "checkout", "--detach", commit)
-    profile = repo / "config/profiles/stabilization-v3.json"
+    profile = repo / "config/profiles/gen003-clean.json"
     profile_bytes = profile.read_bytes()
 
     class Clock(datetime):
@@ -77,7 +77,8 @@ def release_rehearsal(tmp_path, monkeypatch):
     manager = lifecycle.GenerationManager(str(repo))
     old = manager.start_generation("retained failed sample", config_file=profile)
     book = build_default_cohorts({"autoresearch": {"state_dir": old.state_dir}})[0]
-    ledger = PortfolioLedger(Path(book.state_dir) / "portfolio.db", book.name, Decimal("9876"))
+    from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
+    ledger = PortfolioLedger(Path(old.state_dir) / GENERATION_DB_FILENAME, book.name, Decimal("9876"))
     signal_at = datetime(2026, 10, 27, 22, tzinfo=timezone.utc)
     ledger.record_signal(SignalRecord(
         "old-signal", "old-epoch", "old-policy", "old-event", "earnings_call", "ACU", "long",
@@ -173,6 +174,8 @@ def test_retired_invalid_sample_remains_frozen_while_fresh_session_dispatches_on
             "requires_user", "identity_mismatch",
         )
 
+    from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
+
     def external_worker(row, argv, **kwargs):
         workers.append((row["gen_id"], argv))
         assert row["gen_id"] == new.gen_id
@@ -181,12 +184,12 @@ def test_retired_invalid_sample_remains_frozen_while_fresh_session_dispatches_on
         # demonstrate the replacement namespace cannot inherit historical cash.
         for book in build_default_cohorts({"autoresearch": {"state_dir": row["state_dir"]}}):
             cash = Decimal(str(SIZE_PROFILES[book.size_profile].total_capital))
-            ledger = PortfolioLedger(Path(book.state_dir) / "portfolio.db", book.name, cash)
+            ledger = PortfolioLedger(Path(row["state_dir"]) / GENERATION_DB_FILENAME, book.name, cash)
             try:
                 assert ledger.opening_cash() == cash
                 assert ledger.open_positions() == []
-                assert ledger.connection.execute("SELECT COUNT(*) FROM order_intents").fetchone()[0] == 0
-                assert ledger.connection.execute("SELECT COUNT(*) FROM committee_decisions").fetchone()[0] == 0
+                assert ledger.connection.execute("SELECT COUNT(*) FROM order_intents WHERE cohort_id = ?", (book.name,)).fetchone()[0] == 0
+                assert ledger.connection.execute("SELECT COUNT(*) FROM committee_decisions WHERE cohort_id = ?", (book.name,)).fetchone()[0] == 0
             finally:
                 ledger.close()
         return {"success": True, "outcome": "clean", "elapsed_s": 0.0}
@@ -212,7 +215,7 @@ def test_retired_invalid_sample_remains_frozen_while_fresh_session_dispatches_on
     assert repeated["status"] == "healthy", repeated
     assert calls == [(new.gen_id, "2026-10-29", "daily")]
     assert workers == [(new.gen_id, ["--date", "2026-10-29"])]
-    assert len(list(Path(new.state_dir).glob("horizon_*/portfolio.db"))) == 16
+    assert (Path(new.state_dir) / GENERATION_DB_FILENAME).is_file()
     assert _files(Path(old.state_dir)) == old_files
     after = recovery.load_journal(path)
     for key, record in journal["incidents"].items():

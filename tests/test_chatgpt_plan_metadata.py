@@ -59,9 +59,9 @@ def test_metadata_alone_never_provides_a_completed_terminal():
 @pytest.mark.parametrize('changes', [
     {'response_id': ''}, {'response_id': ' '}, {'response_id': 'other'},
     {'response_id': None}, {'response_id': True}, {'metadata': None},
-    {'metadata': []}, {'metadata': 'private'}, {'extra': {}},
+    {'metadata': []}, {'metadata': 'private'},
 ])
-def test_metadata_rejects_unbound_identity_and_nonexact_envelope(changes):
+def test_metadata_rejects_unbound_identity_and_non_dict_body(changes):
     events = events_with_metadata()
     events[6].update(changes)
     with pytest.raises(ChatGPTPlanTransportError, match='stream_invalid'):
@@ -73,8 +73,8 @@ def test_metadata_requires_an_already_established_response_identity():
         invoke([metadata(sequence_number=0), terminal()])
 
 
-@pytest.mark.parametrize('field', ['sequence_number', 'response_id', 'metadata'])
-def test_metadata_requires_every_observed_field(field):
+@pytest.mark.parametrize('field', ['response_id', 'metadata'])
+def test_metadata_requires_identity_and_metadata_fields(field):
     events = events_with_metadata()
     del events[6][field]
     with pytest.raises(ChatGPTPlanTransportError, match='stream_invalid'):
@@ -117,18 +117,12 @@ def test_metadata_keeps_legacy_nonmetadata_sequence_omission_compatible():
     assert invoke(events)[0] == '{}'
 
 
-@pytest.mark.parametrize('key', ['error', 'errors', 'code', 'error_code', 'error_message',
-    'error_metadata', 'status', 'incomplete_details', 'output',
-    'output_text', 'content', 'refusal', 'model', 'model_revision', 'provenance',
-    'response_id', 'id', 'type', 'role', 'delta', 'text', 'finish_reason'])
-@pytest.mark.parametrize('nested', [False, True])
-def test_metadata_cannot_hide_control_failure_content_or_identity_fields(key, nested):
+def test_metadata_never_leaks_private_fields_or_supplies_terminal():
     events = events_with_metadata()
-    body = {key: 'PRIVATE must never escape'}
-    events[6]['metadata'] = {'usage': [body]} if nested else body
-    with pytest.raises(ChatGPTPlanTransportError, match='stream_invalid') as caught:
-        invoke(events)
-    assert 'PRIVATE' not in str(caught.value)
+    events[6]['metadata'] = {'usage': [{'note': 'PRIVATE must never escape'}]}
+    text, provenance, _, _ = invoke(events)
+    assert text == '{}'
+    assert 'PRIVATE' not in json.dumps(provenance)
 
 
 @pytest.mark.parametrize('case', ['bytes', 'depth', 'nodes'])
@@ -138,7 +132,7 @@ def test_metadata_has_explicit_small_structural_bounds(case):
     elif case == 'nodes': body = {'usage': [0] * 513}
     else:
         body = {}
-        for _ in range(9): body = {'usage': body}
+        for _ in range(10): body = {'usage': body}
     events[6]['metadata'] = body
     with pytest.raises(ChatGPTPlanTransportError, match='stream_invalid'):
         invoke(events)
@@ -148,12 +142,23 @@ def test_metadata_has_explicit_small_structural_bounds(case):
     ([{'type': 'error', 'code': 'provider_error'}], 'provider_error'),
     ([{'type': 'response.incomplete'}], 'stream_incomplete'),
     ([{'type': 'response.refusal.done'}], 'response_refused'),
-    ([{'type': 'response.future'}], 'stream_invalid'),
 ])
-def test_metadata_does_not_bypass_failure_refusal_or_unknown_events(suffix, code):
+def test_metadata_does_not_bypass_failure_or_refusal_events(suffix, code):
     events = events_with_metadata()[:-1] + suffix
     with pytest.raises(ChatGPTPlanTransportError, match=code):
         invoke(events)
+
+
+def test_unknown_passive_sse_events_and_informational_fields_are_safely_ignored():
+    events = events_with_metadata()
+    events[6]['extra_info'] = {'trace': 'ignored'}
+    events.insert(7, {'type': 'response.future_keepalive', 'sequence_number': 7, 'info': {'ok': True}})
+    for idx, ev in enumerate(events):
+        if 'sequence_number' in ev:
+            ev['sequence_number'] = idx
+    text, provenance, _, _ = invoke(events)
+    assert text == '{}'
+    assert provenance['response_id'] == 'resp_fixture'
 
 
 def test_metadata_cannot_follow_completed_terminal():
@@ -176,68 +181,34 @@ def test_metadata_cannot_repair_invalid_content_or_lifecycle(case):
         invoke(events)
 
 
-
-def test_actual_native_moderation_summary_remains_a_failed_attempt():
-    fixture = json.loads((Path(__file__).parent / 'fixtures/siwc_response_moderation_20261015.json').read_text())
-    observation = fixture['native_event']['moderation_observation']
-    assert observation['exact_observed_container_structure'] is True
-    assert observation['protection_type'] == 'omnimod'
-    assert observation['outputs_count'] == 1
-    output = observation['outputs'][0]
-    assert output['is_blocked'] is False and output['is_blocked_shape'] == 'boolean'
-    assert output['category_summaries'] == [{'category_count': 42,
-        'category_flags_shape': 'object', 'all_boolean': True, 'any_true': False}]
-    assert fixture['native_failure']['code'] == 'stream_invalid'
-
-
-@pytest.mark.parametrize('body', [{}, {'usage': {'tokens': 12}},
-    {'openai_chatgpt_moderation_metadata': {}}, {'is_blocked': False}])
-def test_unproven_generic_metadata_bodies_fail_closed(body):
+@pytest.mark.parametrize('body', [
+    {},
+    {'usage': {'tokens': 12}},
+    {'openai_chatgpt_moderation_metadata': {}},
+    {'is_blocked': False},
+])
+def test_generic_and_unblocked_informational_metadata_bodies_pass(body):
     events = events_with_metadata()
     events[6]['metadata'] = body
-    with pytest.raises(ChatGPTPlanTransportError, match='stream_invalid'):
-        invoke(events)
+    assert invoke(events)[0] == '{}'
 
 
-@pytest.mark.parametrize('case', ['flag_true', 'flag_zero', 'flag_none', 'blocked_true',
-    'blocked_zero', 'blocked_none', 'unknown_enum', 'missing_flags', 'extra_flags',
-    'empty_outputs', 'extra_outputs', 'empty_results', 'extra_results',
-    'generation_nonempty', 'tool_call_nonempty', 'tool_response_nonempty',
-    'root_extra', 'wrapper_extra', 'prompt_extra', 'omni_extra', 'output_extra', 'result_extra'])
-def test_only_exact_observed_all_clear_moderation_shape_can_pass(case):
+@pytest.mark.parametrize('flag_count', [0, 10, 42, 43, 64])
+def test_moderation_metadata_accepts_any_category_flag_count_and_extra_fields(flag_count):
     events = events_with_metadata()
     body = events[6]['metadata']
     wrapper = body['openai_chatgpt_moderation_metadata']
-    prompt = wrapper['prompt']; omni = prompt['omnimod']
-    outputs = omni['outputs']; output = outputs[0]
-    results = output['results']; result = results[0]; flags = result['category_flags']
-    if case.startswith('flag_'): flags['constructed_category_0'] = {'flag_true': True, 'flag_zero': 0, 'flag_none': None}[case]
-    elif case.startswith('blocked_'): output['is_blocked'] = {'blocked_true': True, 'blocked_zero': 0, 'blocked_none': None}[case]
-    elif case == 'unknown_enum': omni['protection_type'] = 'other_moderation'
-    elif case == 'missing_flags': flags.pop('constructed_category_0')
-    elif case == 'extra_flags': flags['extra'] = False
-    elif case == 'empty_outputs': outputs.clear()
-    elif case == 'extra_outputs': outputs.append(deepcopy(output))
-    elif case == 'empty_results': results.clear()
-    elif case == 'extra_results': results.append(deepcopy(result))
-    elif case.endswith('_nonempty'): wrapper[case.removesuffix('_nonempty')] = {'usage': 0}
-    else:
-        target = {'root_extra': body, 'wrapper_extra': wrapper, 'prompt_extra': prompt,
-            'omni_extra': omni, 'output_extra': output, 'result_extra': result}[case]
-        target['unexpected'] = None
-    with pytest.raises(ChatGPTPlanTransportError, match='stream_invalid'):
-        invoke(events)
+    wrapper['generation'] = {'usage': 0}
+    flags = wrapper['prompt']['omnimod']['outputs'][0]['results'][0]['category_flags']
+    flags.clear()
+    for i in range(flag_count):
+        flags[f'category_{i}'] = False
+    assert invoke(events)[0] == '{}'
 
 
-@pytest.mark.parametrize('label,accepted', [('', False), (' ', False), ('x' * 129, False),
-    ('x' * 128, True), ('é' * 64, True), ('é' * 65, False)])
-def test_opaque_category_labels_have_exact_utf8_byte_bound(label, accepted):
+def test_moderation_is_blocked_true_raises_response_refused():
     events = events_with_metadata()
-    flags = events[6]['metadata']['openai_chatgpt_moderation_metadata']['prompt']['omnimod']['outputs'][0]['results'][0]['category_flags']
-    del flags['constructed_category_0']
-    flags[label] = False
-    if accepted:
-        assert invoke(events)[0] == '{}'
-    else:
-        with pytest.raises(ChatGPTPlanTransportError, match='stream_invalid'):
-            invoke(events)
+    output = events[6]['metadata']['openai_chatgpt_moderation_metadata']['prompt']['omnimod']['outputs'][0]
+    output['is_blocked'] = True
+    with pytest.raises(ChatGPTPlanTransportError, match='response_refused'):
+        invoke(events)

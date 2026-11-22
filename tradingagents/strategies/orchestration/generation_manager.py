@@ -336,6 +336,15 @@ def _extract_preflight_report(stdout: str) -> dict | None:
     if not stdout:
         return None
     lines = stdout.splitlines()
+    for line in reversed(lines):
+        stripped = line.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                obj = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(obj, dict):
+                return obj
     end = next(
         (i for i in range(len(lines) - 1, -1, -1) if lines[i].rstrip() == "}"), None
     )
@@ -1187,16 +1196,6 @@ class GenerationManager:
         Daily results include a canonical ``outcome``. Preflight results retain
         their independent outcome-free report contract.
         """
-        if gen_data.get('source_retirement') is not None:
-            from .source_retirement import generation_for_session, execution_boundary
-
-            try:
-                session = extra_args[extra_args.index('--date') + 1]
-                if session < execution_boundary(gen_data):
-                    raise GenerationManifestError('historical generation revisions are read-only')
-                gen_data = generation_for_session(gen_data, session)
-            except (ValueError, IndexError) as error:
-                raise GenerationManifestError('source retirement requires an exact session') from error
         started_at = datetime.now(timezone.utc)
         capture: dict = {
             "stdout": "",
@@ -1299,19 +1298,32 @@ class GenerationManager:
             )
             pass_fds = (inherited_fd,)
 
-        cmd = [
-            str(self._venv_python),
-            "scripts/run_cohorts.py",
-            *extra_args,
-        ]
+        from ._io import load_json_strict
+        from .run_outcome import DAILY_RESULT_WIRE_VERSION
 
         start = time.monotonic()
         try:
-            proc = _run_preflight_worker(
-                cmd, cwd=gen_data["worktree_path"], env=env,
-                timeout=_GENERATION_TIMEOUT_S, pass_fds=pass_fds,
-            )
-            elapsed = time.monotonic() - start
+            with tempfile.TemporaryDirectory(prefix="eventedge-worker-ipc-") as ipc_dir:
+                result_file = Path(ipc_dir) / "worker_result.json"
+                cmd = [
+                    str(self._venv_python),
+                    "scripts/run_cohorts.py",
+                    *extra_args,
+                    "--result-file",
+                    str(result_file),
+                ]
+                proc = _run_preflight_worker(
+                    cmd, cwd=gen_data["worktree_path"], env=env,
+                    timeout=_GENERATION_TIMEOUT_S, pass_fds=pass_fds,
+                )
+                elapsed = time.monotonic() - start
+                file_payload = None
+                if result_file.is_file():
+                    try:
+                        file_payload = load_json_strict(result_file)
+                    except (OSError, ValueError):
+                        file_payload = None
+
             capture.update(
                 {
                     "stdout": proc.stdout,
@@ -1334,6 +1346,19 @@ class GenerationManager:
                     preflight_date = extra_args[date_index]
                 except (ValueError, IndexError):
                     preflight_date = ""
+                if isinstance(file_payload, dict):
+                    normalized = normalize_preflight_report(
+                        file_payload, mode=preflight_mode, trading_date=preflight_date
+                    )
+                    if normalized is not None:
+                        return _preflight_subprocess_result(
+                            stdout=json.dumps(normalized),
+                            stderr=proc.stderr,
+                            returncode=proc.returncode,
+                            elapsed=elapsed,
+                            mode=preflight_mode,
+                            trading_date=preflight_date,
+                        )
                 return _preflight_subprocess_result(
                     stdout=proc.stdout,
                     stderr=proc.stderr,
@@ -1343,11 +1368,16 @@ class GenerationManager:
                     trading_date=preflight_date,
                 )
 
-            # The printed cohort results are authoritative for the distinction
-            # between execution failure and candidate-data quarantine. Parse
-            # and validate the versioned worker wire before interpreting its
-            # alert exit code; unmarked or contradictory output fails closed.
-            cohort_results = _extract_cohort_results(proc.stdout)
+            # Prefer structured JSON from --result-file (decoupled from stdout/stderr);
+            # fall back to stdout wire only when a mocked worker doesn't write the file.
+            if (
+                isinstance(file_payload, dict)
+                and file_payload.get("wire_version") == DAILY_RESULT_WIRE_VERSION
+                and isinstance(file_payload.get("cohort_results"), dict)
+            ):
+                cohort_results = file_payload["cohort_results"]
+            else:
+                cohort_results = _extract_cohort_results(proc.stdout)
             try:
                 date_index = extra_args.index("--date") + 1
                 daily_trading_date = extra_args[date_index]
@@ -1614,18 +1644,11 @@ class GenerationManager:
                 not isinstance(entry, dict) for entry in row["run_history"]
             ):
                 raise GenerationManifestError("generation manifest has an invalid run history")
-            from .source_retirement import validate_generation_retirement, CONFIG_NAME
-
-            try:
-                retirement = validate_generation_retirement(row)
-            except ValueError as error:
-                raise GenerationManifestError('generation manifest has invalid source retirement') from error
-            if optional_config & row.keys() or retirement is not None:
+            if optional_config & row.keys():
                 from .generation_config import FROZEN_CONFIG_NAME
-                filename = CONFIG_NAME if retirement is not None else FROZEN_CONFIG_NAME
 
                 if (type(row.get('config_file')) is not str
-                        or row['config_file'] != str(Path(row['state_dir']) / filename)
+                        or row['config_file'] != str(Path(row['state_dir']) / FROZEN_CONFIG_NAME)
                         or type(row.get('config_sha256')) is not str
                         or not re.fullmatch(r'[0-9a-f]{64}', row['config_sha256'])):
                     raise GenerationManifestError('generation manifest has invalid configuration identity')

@@ -187,53 +187,32 @@ def recover_owner(owner, session: date, *, now: datetime | None = None) -> dict:
 
 
 def atomic_json(path: Path, document: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.recovery-')
-    try:
-        with os.fdopen(fd, 'w') as handle:
-            json.dump(document, handle, sort_keys=True, separators=(',', ':'), allow_nan=False)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    from ._io import atomic_write_json
+
+    atomic_write_json(path, document, indent=None, sort_keys=True)
 
 
 def identity_for(repo: Path, generation: dict, session: str) -> dict:
     """Bind identity to actual checkout/profile, never to environment assertions."""
-    from .generation_config import read_generation_config
-    from .source_retirement import validate_generation_retirement, generation_for_session, config_path_for_generation, validate_code_revision
+    from .generation_config import FROZEN_CONFIG_NAME, read_generation_config
+
     date.fromisoformat(session)
-    binding = validate_generation_retirement(generation, repo=repo)
-    revision = validate_code_revision(generation, repo=repo)
     logical_worktree = generation['worktree_path']
-    generation = generation_for_session(generation, session)
     commit = generation['git_commit']
     if not re.fullmatch('[0-9a-f]{40}', commit) or not re.fullmatch('gen_[0-9]+', generation['gen_id']):
         raise ValueError('identity_mismatch')
-    from .generation_config import FROZEN_CONFIG_NAME
     worktree = Path(generation['worktree_path'])
     state = Path(generation['state_dir'])
     expected_worktree = repo / '.worktrees' / generation['gen_id']
-    if binding is not None and session < binding['effective_session']:
-        expected_worktree = Path(binding['previous_worktree_path'])
-    elif revision is not None and session < revision['effective_session']:
-        expected_worktree = Path(revision['previous_worktree_path'])
     expected_state = repo / 'data/generations' / generation['gen_id']
     if worktree != expected_worktree or state != expected_state:
         raise ValueError('identity_mismatch')
     for target in (worktree, state):
         if target.resolve() != target or any(parent.is_symlink() for parent in (target, *target.parents)):
             raise ValueError('identity_mismatch')
-    expected_config = (Path(binding['config_file']) if binding is not None and session >= binding['effective_session']
-                       else state / FROZEN_CONFIG_NAME)
-    if config_path_for_generation(generation) != expected_config:
+    config_sha = generation.get('config_sha256')
+    config_file = generation.get('config_file')
+    if not config_sha or not config_file or Path(config_file) != state / FROZEN_CONFIG_NAME:
         raise ValueError('identity_mismatch')
     actual = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=worktree,
                             check=True, capture_output=True, text=True).stdout.strip()
@@ -243,39 +222,21 @@ def identity_for(repo: Path, generation: dict, session: str) -> dict:
                             check=True, capture_output=True, text=True).stdout.strip()
     repo_common = subprocess.run(['git', 'rev-parse', '--git-common-dir'], cwd=repo,
                                  check=True, capture_output=True, text=True).stdout.strip()
-    if (actual != commit or changed or (worktree/ common).resolve() != (repo / repo_common).resolve()):
+    if (actual != commit or changed or (worktree / common).resolve() != (repo / repo_common).resolve()):
         raise ValueError('identity_mismatch')
     pointer = worktree / '.git'
-    admin = Path(subprocess.run(['git','rev-parse','--absolute-git-dir'], cwd=worktree,
-        check=True,capture_output=True,text=True).stdout.strip())
+    admin = Path(subprocess.run(['git', 'rev-parse', '--absolute-git-dir'], cwd=worktree,
+        check=True, capture_output=True, text=True).stdout.strip())
     backlink = admin / 'gitdir'
-    if (pointer.is_symlink() or not pointer.is_file() or admin.resolve()!=admin
-            or admin.parent != (repo/repo_common).resolve()/'worktrees'
+    if (pointer.is_symlink() or not pointer.is_file() or admin.resolve() != admin
+            or admin.parent != (repo / repo_common).resolve() / 'worktrees'
             or backlink.is_symlink() or not backlink.is_file()
-            or backlink.read_text().strip()!=str(pointer)):
+            or backlink.read_text().strip() != str(pointer)):
         raise ValueError('identity_mismatch')
-    config_sha = generation.get('config_sha256')
-    config_file = generation.get('config_file')
-    # Frozen profiles are required for unattended recovery; legacy implicit
-    # environment/default configuration needs an explicit operator migration.
-    if not config_sha or not config_file:
-        raise ValueError('identity_mismatch')
-    body, config, _ = read_generation_config(config_file, config_sha)
-    if binding is not None and session >= binding['effective_session']:
-        from .source_retirement_profile import profile_binding
-
-        proof = profile_binding(config, config_sha)
-        previous_body, _, _ = read_generation_config(
-            binding['previous_config_file'], binding['previous_config_sha256'])
-        if (proof is None or proof['effective_session'] != binding['effective_session']
-                or proof['previous_config_sha256'] != binding['previous_config_sha256']
-                or proof['previous_config_text'].encode('utf-8') != previous_body):
-            raise ValueError('identity_mismatch')
+    read_generation_config(config_file, config_sha)
     return {'generation_id': generation['gen_id'], 'generation_commit': commit,
             'config_sha256': config_sha, 'session': session,
             'state_dir': str(Path(generation['state_dir']).resolve()),
-            # Incident keys include this historical logical identity. Moving
-            # the proven old checkout must never create a second incident key.
             'worktree_path': logical_worktree}
 
 
@@ -471,24 +432,33 @@ def _completed_owner_valid(owner, session, now) -> bool:
 
 def session_recovery_proof(state, generation, session, epoch_id):
     """Read-only canonical proof; constructors never initialize/migrate state."""
-    import sqlite3
+    from ._io import open_sqlite
     from .session_executor import PHASES
     from .source_inputs import configuration_fingerprint
     from .operational_report import EXPECTED_COHORTS
+    from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
+
     state = Path(state)
     proof = {'books': {}, 'accepted_inputs': {}, 'metrics': {}}
+    unified_path = state / GENERATION_DB_FILENAME
+    use_unified = unified_path.is_file() and not unified_path.is_symlink()
     for name in EXPECTED_COHORTS:
-        path = state/name/'portfolio.db'
+        path = unified_path if use_unified else (state / name / 'portfolio.db')
         if path.is_symlink() or not path.is_file():
             raise ValueError('recovery book missing')
-        with sqlite3.connect(f'file:{path}?mode=ro', uri=True) as connection:
-            connection.row_factory = sqlite3.Row
-            connection.execute('PRAGMA query_only=ON')
-            context = connection.execute('SELECT * FROM session_execution_contexts WHERE session=?', (session,)).fetchall()
-            phases = connection.execute('SELECT * FROM session_phases WHERE session=? ORDER BY phase', (session,)).fetchall()
-            staging = connection.execute('SELECT * FROM staging_runs WHERE session=?', (session,)).fetchall()
-            snapshot = connection.execute('SELECT * FROM account_snapshots WHERE session=?', (session,)).fetchall()
-            committee = connection.execute('SELECT * FROM committee_decisions WHERE session=?', (session,)).fetchall()
+        with open_sqlite(path, readonly=True) as connection:
+            if use_unified:
+                context = connection.execute('SELECT * FROM session_execution_contexts WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+                phases = connection.execute('SELECT * FROM session_phases WHERE cohort_id=? AND session=? ORDER BY phase', (name, session)).fetchall()
+                staging = connection.execute('SELECT * FROM staging_runs WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+                snapshot = connection.execute('SELECT * FROM account_snapshots WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+                committee = connection.execute('SELECT * FROM committee_decisions WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+            else:
+                context = connection.execute('SELECT * FROM session_execution_contexts WHERE session=?', (session,)).fetchall()
+                phases = connection.execute('SELECT * FROM session_phases WHERE session=? ORDER BY phase', (session,)).fetchall()
+                staging = connection.execute('SELECT * FROM staging_runs WHERE session=?', (session,)).fetchall()
+                snapshot = connection.execute('SELECT * FROM account_snapshots WHERE session=?', (session,)).fetchall()
+                committee = connection.execute('SELECT * FROM committee_decisions WHERE session=?', (session,)).fetchall()
             if not (len(context)==len(staging)==len(snapshot)==len(committee)==1 and len(phases)==len(PHASES)):
                 raise ValueError('recovery book incomplete')
             context, staging, snapshot, committee = (dict(rows[0]) for rows in (context,staging,snapshot,committee))
@@ -505,15 +475,33 @@ def session_recovery_proof(state, generation, session, epoch_id):
                     raise ValueError('recovery phase proof invalid')
                 expected = row['post_state_digest']
             economics = {}
-            for table in ('fills','cash_events','marks','borrow_accruals','financing_accruals',
-                          'dividend_events','fee_events','benchmark_observations','session_runs',
-                          'session_invalidations'):
-                rows = connection.execute('SELECT * FROM '+table+' WHERE session=? ORDER BY 1 LIMIT 10001',
-                                          (session,)).fetchall()
-                if len(rows)>10000:
-                    raise ValueError('recovery economic proof exceeds bounds')
-                economics[table] = _hash_document([dict(row) for row in rows])
-            opening = connection.execute("SELECT * FROM cash_events WHERE session IS NULL ORDER BY cash_event_id LIMIT 10001").fetchall()
+            if use_unified:
+                for table in ('fills','cash_events','borrow_accruals','financing_accruals','session_runs','dividend_receivables'):
+                    rows = connection.execute('SELECT * FROM '+table+' WHERE cohort_id=? AND session=? ORDER BY 1 LIMIT 10001',
+                                              (name,session)).fetchall()
+                    if len(rows)>10000:
+                        raise ValueError('recovery economic proof exceeds bounds')
+                    economics[table] = _hash_document([dict(row) for row in rows])
+                for table, col in (('marks','session'),('benchmark_observations','session'),('dividend_events','ex_session')):
+                    rows = connection.execute('SELECT * FROM '+table+' WHERE '+col+'=? ORDER BY 1 LIMIT 10001',
+                                              (session,)).fetchall()
+                    if len(rows)>10000:
+                        raise ValueError('recovery economic proof exceeds bounds')
+                    economics[table] = _hash_document([dict(row) for row in rows])
+            else:
+                for table in ('fills','cash_events','marks','borrow_accruals','financing_accruals',
+                              'dividend_events','fee_events','benchmark_observations','session_runs',
+                              'session_invalidations'):
+                    rows = connection.execute('SELECT * FROM '+table+' WHERE session=? ORDER BY 1 LIMIT 10001',
+                                              (session,)).fetchall()
+                    if len(rows)>10000:
+                        raise ValueError('recovery economic proof exceeds bounds')
+                    economics[table] = _hash_document([dict(row) for row in rows])
+            opening = (
+                connection.execute("SELECT * FROM cash_events WHERE cohort_id=? AND session IS NULL ORDER BY cash_event_id LIMIT 10001", (name,)).fetchall()
+                if use_unified
+                else connection.execute("SELECT * FROM cash_events WHERE session IS NULL ORDER BY cash_event_id LIMIT 10001").fetchall()
+            )
             if len(opening)>10000:
                 raise ValueError('recovery opening proof exceeds bounds')
             economics['opening_cash_events'] = _hash_document([dict(row) for row in opening])
@@ -525,11 +513,15 @@ def session_recovery_proof(state, generation, session, epoch_id):
                 'staging_run_id':staging['staging_run_id'], 'staging_post_state_digest':staging['post_state_digest'],
                 'staging_digest':_hash_document(staging), 'snapshot_digest':_hash_document(snapshot),
                 'committee_digest':_hash_document(committee)}
-    with sqlite3.connect(f'file:{state / "metrics_v2.sqlite3"}?mode=ro',uri=True) as connection:
-        connection.row_factory = sqlite3.Row
-        connection.execute('PRAGMA query_only=ON')
-        for table in ('strategy_health','candidate_bar_recoveries','governed_bar_recoveries',
-                      'candidate_signal_identity_bindings','candidate_input_issues'):
+    metrics_db = unified_path if use_unified else (state / "metrics_v2.sqlite3")
+    with open_sqlite(metrics_db, readonly=True) as connection:
+        metric_tables = (
+            ('strategy_health', 'bar_recoveries', 'candidate_input_issues')
+            if use_unified
+            else ('strategy_health','candidate_bar_recoveries','governed_bar_recoveries',
+                  'candidate_signal_identity_bindings','candidate_input_issues')
+        )
+        for table in metric_tables:
             rows = connection.execute('SELECT * FROM '+table+' WHERE epoch_id=? AND session=? ORDER BY 1 LIMIT 10001',
                                       (epoch_id,session)).fetchall()
             if len(rows)>10000:
@@ -575,20 +567,11 @@ def write_recovery_receipt(owner, session: date, *, now=None, configuration_sha2
 
 
 def _read_recovery_configuration(state, expected_configuration, session):
-    """Resolve only the two immutable names, retaining the original proof join."""
+    """Verify the generation's frozen configuration matches expected digest."""
+    _ = session
     from .generation_config import FROZEN_CONFIG_NAME, read_generation_config
-    from .source_retirement import CONFIG_NAME
-    from .source_retirement_profile import profile_binding
 
-    previous_body, _, previous_sha = read_generation_config(state / FROZEN_CONFIG_NAME)
-    if previous_sha == expected_configuration:
-        return
-    _, config, _ = read_generation_config(state / CONFIG_NAME, expected_configuration)
-    proof = profile_binding(config, expected_configuration)
-    if (proof is None or proof['previous_config_sha256'] != previous_sha
-            or proof['previous_config_text'].encode('utf-8') != previous_body
-            or session < proof['effective_session']):
-        raise ValueError('recovery receipt identity invalid')
+    read_generation_config(state / FROZEN_CONFIG_NAME, expected_configuration)
 
 
 def validate_recovery_receipt(state, generation, session, commit, expected_configuration=None):

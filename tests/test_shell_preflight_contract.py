@@ -71,8 +71,8 @@ def _calls(path: Path) -> list[str]:
     return path.read_text().splitlines() if path.exists() else []
 
 
-def test_screen_failure_continues_to_governed_then_daily(tmp_path: Path) -> None:
-    env, calls_path = _shell_environment(tmp_path, screen_rc=1, governed_rc=0)
+def test_daily_skips_redundant_screen_and_runs_governed_then_daily(tmp_path: Path) -> None:
+    env, calls_path = _shell_environment(tmp_path, governed_rc=0)
 
     result = subprocess.run(
         ["bash", str(REPO_ROOT / "scripts" / "daily_trading.sh")],
@@ -83,10 +83,11 @@ def test_screen_failure_continues_to_governed_then_daily(tmp_path: Path) -> None
 
     assert result.returncode == 0, result.stderr
     calls = _calls(calls_path)
-    assert len(calls) == 4
-    assert "preflight --date 2026-08-06 --preflight-mode screen" in calls[0]
-    assert "preflight --date 2026-08-06 --preflight-mode governed" in calls[1]
-    assert "run-daily --date 2026-08-06" in calls[2]
+    assert len(calls) == 3
+    assert all("--preflight-mode screen" not in call for call in calls)
+    assert "preflight --date 2026-08-06 --preflight-mode governed" in calls[0]
+    assert "run-daily --date 2026-08-06" in calls[1]
+    assert "generate_operational_report.py" in calls[2]
 
 
 @pytest.mark.parametrize("label", ("failed", "busy"))
@@ -103,9 +104,9 @@ def test_governed_nonzero_never_invokes_daily(tmp_path: Path, label: str) -> Non
 
     assert result.returncode == 1
     calls = _calls(calls_path)
-    assert len(calls) == 3
-    assert "--preflight-mode screen" in calls[0]
-    assert "--preflight-mode governed" in calls[1]
+    assert len(calls) == 2
+    assert "--preflight-mode governed" in calls[0]
+    assert all("--preflight-mode screen" not in call for call in calls)
     assert all("run-daily" not in call for call in calls)
 
 
@@ -122,10 +123,8 @@ def test_governed_ready_with_recovery_invokes_daily_exactly_once(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     calls = _calls(calls_path)
     assert sum("run-daily" in call for call in calls) == 1
-    assert ["--preflight-mode screen" in calls[0], "--preflight-mode governed" in calls[1]] == [
-        True,
-        True,
-    ]
+    assert "--preflight-mode governed" in calls[0]
+    assert all("--preflight-mode screen" not in call for call in calls)
 
 
 def test_daily_failure_propagates_nonzero(tmp_path: Path) -> None:
@@ -140,8 +139,14 @@ def test_daily_failure_propagates_nonzero(tmp_path: Path) -> None:
 
     assert result.returncode == 1
     calls = _calls(calls_path)
-    assert len(calls) == 4
-    assert "run-daily --date 2026-08-06" in calls[2]
+    assert len(calls) == 3
+    assert "run-daily --date 2026-08-06" in calls[1]
+
+
+def test_systemd_services_do_not_override_blocked_tickers() -> None:
+    for name in ("trade.service", "trade-preflight.service"):
+        content = (REPO_ROOT / "deploy" / "systemd" / name).read_text(encoding="utf-8")
+        assert "BLOCKED_TICKERS" not in content
 
 
 def test_midday_preflight_is_explicitly_screen_only(tmp_path: Path) -> None:

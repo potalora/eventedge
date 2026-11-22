@@ -121,7 +121,7 @@ class USASpendingSource:
         """Exhaust new-award windows; budget failures retain incomplete evidence."""
         date_from, date_to = _new_award_window(date_from, date_to)
         if current_provider_deadline("usaspending") is None:
-            with provider_budget("usaspending", time.monotonic() + 60):
+            with provider_budget("usaspending", time.monotonic() + 120):
                 return self.search_contracts(keywords, recipient, date_from, date_to, min_amount)
         records, seen, page = [], set(), 1
         while True:
@@ -322,7 +322,7 @@ class USASpendingSource:
         native_key = contract.get("generated_internal_id") or contract.get("internal_id")
         url = f"{BASE_URL}awards/{quote(str(native_key), safe='')}/"
         try:
-            response = provider_request("usaspending", "GET", url, timeout=15, stream=True,
+            response = provider_request("usaspending", "GET", url, timeout=30, stream=True,
                                         return_statuses=(404,), operation=detail_request_operation(url))
             receipt = self._identity_response(response, method="GET", url=url)
             if receipt["status"] == 404:
@@ -374,7 +374,7 @@ class USASpendingSource:
                                   "Action Date", "Transaction Amount", "Awarding Agency",
                                   "Transaction Description"],
                        "page": page, "limit": 10, "sort": "Transaction Amount", "order": "desc"}
-            response = provider_request("usaspending", "POST", url, json=request, timeout=15, stream=True)
+            response = provider_request("usaspending", "POST", url, json=request, timeout=30, stream=True)
             receipt = self._identity_response(response, method="POST", url=url, request=request)
             evidence["transaction_pages"].append(receipt)
             body = receipt["body"]
@@ -387,7 +387,7 @@ class USASpendingSource:
         else:
             raise ValueError("recipient fallback transaction population incomplete")
         profile_url = f"{BASE_URL}recipient/{quote(contract['recipient_id'], safe='')}/?year=all"
-        response = provider_request("usaspending", "GET", profile_url, timeout=15, stream=True)
+        response = provider_request("usaspending", "GET", profile_url, timeout=30, stream=True)
         evidence["recipient_profile"] = self._identity_response(response, method="GET", url=profile_url)
         contract.update(recipient_identity_status="native_recipient_verified",
                         recipient_identity_source=profile_url)

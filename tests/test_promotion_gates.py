@@ -20,13 +20,13 @@ def _passing() -> PromotionEvidence:
     return PromotionEvidence(
         clean_common_sessions=30,
         independent_completed_ideas=50,
-        strategy_claim_event_counts={"congressional_trades": 30},
+        strategy_claim_event_counts={"earnings_call": 30},
         missing_marks=0,
         stale_marks=0,
         sessions_aligned=True,
         stable_epoch_hashes=True,
         crosses_invalid_boundary=False,
-        classified_strategy_count=12,
+        classified_strategy_count=5,
         cost_categories_present=True,
         risk_limit_breach=False,
         matched_excess_return=0.01,
@@ -165,86 +165,17 @@ def test_invalid_policy_is_rejected_before_evaluation(
         PromotionPolicy(**{field: value})
 
 
-def test_promotion_payload_supports_fixture_injection_without_filesystem_writes(
-    tmp_path: Path,
-) -> None:
-    from scripts.run_generations import _promotion_payload
-
-    watched = tmp_path / "watched"
-    watched.write_text("immutable")
-    before = watched.stat().st_mtime_ns
-
-    payload = _promotion_payload(
-        "candidate",
-        "baseline",
-        repo=tmp_path,
-        evidence_builder=lambda *_args: _passing(),
+def test_promotion_policy_expected_strategy_count_is_configurable() -> None:
+    assert PromotionPolicy().expected_strategy_count == 5
+    # Mismatched count fails closed
+    wrong = PromotionEvaluator().evaluate(replace(_passing(), classified_strategy_count=4))
+    assert wrong.status is PromotionDecisionStatus.FAIL
+    assert wrong.reasons == ("unclassified_strategy_silence",)
+    # Explicit override is honored
+    custom = PromotionEvaluator(PromotionPolicy(expected_strategy_count=7)).evaluate(
+        replace(_passing(), classified_strategy_count=7)
     )
-
-    assert payload["candidate"] == "candidate"
-    assert payload["baseline"] == "baseline"
-    assert payload["decision"]["status"] == "ELIGIBLE_FOR_MANUAL_REVIEW"
-    assert watched.stat().st_mtime_ns == before
-
-
-def test_candidate_ledgers_close_when_baseline_opening_fails(tmp_path: Path) -> None:
-    from scripts.run_generations import (
-        PromotionAdvisoryUnavailable,
-        _build_promotion_evidence,
-    )
-
-    manifest = tmp_path / "data" / "generations"
-    manifest.mkdir(parents=True)
-    manifest.joinpath("manifest.json").write_text(
-        '{"generations":[{"gen_id":"candidate","state_dir":"candidate"},'
-        '{"gen_id":"baseline","state_dir":"baseline"}]}'
-    )
-
-    class Ledger:
-        closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    candidate_ledger = Ledger()
-
-    def opener(generation_id: str, _record):
-        if generation_id == "candidate":
-            return object(), (candidate_ledger,)
-        raise PromotionAdvisoryUnavailable("baseline ledger unavailable")
-
-    with pytest.raises(
-        PromotionAdvisoryUnavailable, match="baseline ledger unavailable"
-    ):
-        _build_promotion_evidence(
-            "candidate", "baseline", tmp_path, service_opener=opener
-        )
-    assert candidate_ledger.closed is True
-
-
-def test_cli_refuses_missing_evidence_before_manager_or_state_creation(
-    tmp_path: Path, monkeypatch
-) -> None:
-    from scripts import run_generations
-
-    monkeypatch.setattr(run_generations, "_repo_root", lambda: str(tmp_path))
-    monkeypatch.setattr(
-        "sys.argv",
-        [
-            "run_generations.py",
-            "promotion-status",
-            "--candidate",
-            "gen_candidate",
-            "--baseline",
-            "gen_baseline",
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        run_generations.main()
-
-    assert exc.value.code == 2
-    assert list(tmp_path.iterdir()) == []
+    assert custom.status is PromotionDecisionStatus.ELIGIBLE_FOR_MANUAL_REVIEW
 
 
 def test_promotion_module_does_not_import_directional_accuracy_or_learning() -> None:

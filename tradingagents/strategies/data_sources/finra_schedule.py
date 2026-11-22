@@ -15,7 +15,11 @@ from .fetch_errors import SourceFetchError
 
 SCHEDULE_SOURCE = 'https://www.finra.org/filing-reporting/regulatory-filing-systems/short-interest'
 SCHEDULE_VERSION = 'finra_publication_dates_reviewed_2026-10-22'
+DYNAMIC_SCHEDULE_VERSION = 'finra_dynamic_settlement_v1'
 PUBLICATION_POLICY = 'date_only_following_new_york_day_v1'
+DYNAMIC_PUBLICATION_POLICY = 'dynamic_settlement_window_v1'
+MAX_SETTLEMENT_AGE_DAYS = 28
+_REVIEWED_END_DATE = date(2026, 12, 31)
 _NEW_YORK = ZoneInfo('America/New_York')
 # Late 2025 carryover plus the published 2026 table. No extrapolated holidays.
 _PUBLICATIONS = dict(pair.split() for pair in '''
@@ -63,6 +67,11 @@ def _aware(value):
     return value
 
 
+def _is_valid_semi_monthly_settlement(day: date) -> bool:
+    """FINRA short interest settles semi-monthly on business days mid-month or month-end."""
+    return day.weekday() < 5 and (11 <= day.day <= 15 or day.day >= 25)
+
+
 def _context(*, acquired_at, as_of=None):
     acquired_at = _aware(acquired_at)
     observed_day = acquired_at.astimezone(_NEW_YORK).date()
@@ -75,18 +84,28 @@ def _context(*, acquired_at, as_of=None):
     else:
         raise _invalid()
     effective = min(observed_day, reference_day)
-    if observed_day.year != 2026 or effective.year != 2026:
-        raise _invalid()
-    eligible = sorted(day for day, published in _PUBLICATIONS.items() if published < effective.isoformat())
-    required = eligible[-1]
+    if effective <= _REVIEWED_END_DATE:
+        eligible = sorted(day for day, published in _PUBLICATIONS.items() if published < effective.isoformat())
+        if eligible:
+            required = eligible[-1]
+            return {
+                'required_settlement_date': required,
+                'publication_date': _PUBLICATIONS[required],
+                'effective_as_of': effective.isoformat(),
+                'acquired_at': acquired_at.isoformat(),
+                'publication_day_ambiguous': effective.isoformat() in _PUBLICATIONS.values(),
+                'publication_policy': PUBLICATION_POLICY,
+                'schedule_version': SCHEDULE_VERSION,
+                'schedule_source': SCHEDULE_SOURCE,
+            }
     return {
-        'required_settlement_date': required,
-        'publication_date': _PUBLICATIONS[required],
+        'required_settlement_date': None,
+        'publication_date': None,
         'effective_as_of': effective.isoformat(),
         'acquired_at': acquired_at.isoformat(),
-        'publication_day_ambiguous': effective.isoformat() in _PUBLICATIONS.values(),
-        'publication_policy': PUBLICATION_POLICY,
-        'schedule_version': SCHEDULE_VERSION,
+        'publication_day_ambiguous': False,
+        'publication_policy': DYNAMIC_PUBLICATION_POLICY,
+        'schedule_version': DYNAMIC_SCHEDULE_VERSION,
         'schedule_source': SCHEDULE_SOURCE,
     }
 
@@ -104,13 +123,25 @@ def validate_current_settlement(settlement_date: str | date | None, *, acquired_
     if settlement_date is None:
         return {**context, 'status': 'missing'}
     try:
-        day = date.fromisoformat(str(settlement_date)).isoformat()
+        parsed_day = date.fromisoformat(str(settlement_date))
+        day = parsed_day.isoformat()
     except (ValueError, TypeError):
         raise _invalid() from None
-    if day >= min(_PUBLICATIONS) and day not in _PUBLICATIONS:
+    if context['publication_policy'] == PUBLICATION_POLICY:
+        if day >= min(_PUBLICATIONS) and day not in _PUBLICATIONS:
+            raise _invalid()
+        required = context['required_settlement_date']
+        status = 'current' if day == required else 'stale' if day < required else 'not_yet_available'
+        return {**context, 'status': status}
+    effective = date.fromisoformat(context['effective_as_of'])
+    if day not in _PUBLICATIONS and not _is_valid_semi_monthly_settlement(parsed_day):
         raise _invalid()
-    required = context['required_settlement_date']
-    status = 'current' if day == required else 'stale' if day < required else 'not_yet_available'
+    if parsed_day > effective:
+        status = 'not_yet_available'
+    elif (effective - parsed_day).days <= MAX_SETTLEMENT_AGE_DAYS:
+        status = 'current'
+    else:
+        status = 'stale'
     return {**context, 'status': status}
 
 

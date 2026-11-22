@@ -9,6 +9,8 @@ from numbers import Real
 from types import MappingProxyType
 from typing import Mapping
 
+from tradingagents.strategies.config import ACTIVE_STRATEGIES
+
 
 class PromotionDecisionStatus(str, Enum):
     """The only permitted promotion outcomes; none executes a promotion."""
@@ -26,6 +28,7 @@ class PromotionPolicy:
     min_strategy_claim_events: int = 30
     max_drawdown: float = 0.15
     max_drawdown_delta: float = 0.02
+    expected_strategy_count: int = len(ACTIVE_STRATEGIES)
 
     def __post_init__(self) -> None:
         for field in (
@@ -33,8 +36,11 @@ class PromotionPolicy:
             "min_initial_ideas",
             "min_manual_ideas",
             "min_strategy_claim_events",
+            "expected_strategy_count",
         ):
             _require_nonnegative_int(field, getattr(self, field))
+        if self.expected_strategy_count < 1:
+            raise ValueError("expected_strategy_count must be positive")
         for field in ("max_drawdown", "max_drawdown_delta"):
             _require_finite_real(field, getattr(self, field))
         if self.max_drawdown < 0:
@@ -146,7 +152,7 @@ class PromotionEvaluator:
             failures.append("unstable_epoch_hashes")
         if evidence.crosses_invalid_boundary:
             failures.append("invalid_session_or_epoch_bridge")
-        if evidence.classified_strategy_count != 12:
+        if evidence.classified_strategy_count != self.policy.expected_strategy_count:
             failures.append("unclassified_strategy_silence")
         if not evidence.cost_categories_present:
             failures.append("missing_cost_or_borrow_category")

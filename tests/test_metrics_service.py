@@ -375,6 +375,8 @@ def test_cohort_comparison_delegates_to_metrics_service() -> None:
 def test_constructor_requires_exact_immutable_unique_database_bindings(
     tmp_path, ledger_factory
 ) -> None:
+    from tradingagents.strategies.state.generation_db import GenerationDB
+
     ledger = ledger_factory("cohort-a")
     with pytest.raises(ValueError, match="exactly match"):
         MetricsService(tmp_path, {"declared": ledger})
@@ -384,20 +386,22 @@ def test_constructor_requires_exact_immutable_unique_database_bindings(
     bindings.clear()
     assert service.cohort_ids == ("cohort-a",)
 
-    reopened = PortfolioLedger.open_existing(ledger.path)
+    # Unified generation.sqlite3: multiple distinct cohorts cleanly share one DB
+    shared_db = GenerationDB.for_state_dir(tmp_path / "shared")
+    c1 = PortfolioLedger(shared_db, "cohort-a", Decimal("5000"))
+    c2 = PortfolioLedger(shared_db, "cohort-b", Decimal("10000"))
     try:
-        reopened.cohort_id = "cohort-b"
-        with pytest.raises(ValueError, match="same ledger database"):
-            MetricsService(
-                tmp_path / "duplicate",
-                {"cohort-a": ledger, "cohort-b": reopened},
-            )
+        unified_service = MetricsService(
+            shared_db, {"cohort-a": c1, "cohort-b": c2}
+        )
+        assert unified_service.cohort_ids == ("cohort-a", "cohort-b")
     finally:
-        reopened.close()
+        c1.close()
+        c2.close()
 
 
 def test_metric_store_read_only_open_blocks_mutation(tmp_path) -> None:
-    path = tmp_path / "metrics_v2.sqlite3"
+    path = tmp_path / "generation.sqlite3"
     writable = MetricStore(path)
     writable.save_epoch(_epoch())
 
@@ -405,7 +409,7 @@ def test_metric_store_read_only_open_blocks_mutation(tmp_path) -> None:
 
     assert read_only.read_only is True
     assert read_only.load_epoch("epoch-1") == _epoch()
-    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+    with pytest.raises((sqlite3.OperationalError, PermissionError), match="readonly"):
         read_only.save_epoch(_epoch("epoch-2"))
 
 
@@ -435,9 +439,9 @@ def test_cohort_report_reads_once_bounds_fills_and_aggregates_once(
         counts["benchmarks"] += 1
         return original_benchmarks(*args, **kwargs)
 
-    def read_signals(*args, **kwargs):
+    def read_signal_observations(*args, **kwargs):
         counts["signals"] += 1
-        return [signal, signal]
+        return [(signal, None, None), (signal, None, None)]
 
     def read_fills(*args, **kwargs):
         counts["fills"] += 1
@@ -468,7 +472,7 @@ def test_cohort_report_reads_once_bounds_fills_and_aggregates_once(
 
     monkeypatch.setattr(ledger, "read_snapshots", read_snapshots)
     monkeypatch.setattr(ledger, "read_benchmark_observations", read_benchmarks)
-    monkeypatch.setattr(ledger, "read_signals", read_signals)
+    monkeypatch.setattr(ledger, "read_signal_observations", read_signal_observations)
     monkeypatch.setattr(ledger, "read_fills", read_fills)
     monkeypatch.setattr(service_module, "portfolio_metrics", aggregate)
 
@@ -493,10 +497,10 @@ def test_cohort_report_fails_conflicting_signals_and_gapped_window_before_fills(
     service.store.save_epoch(_epoch())
     monkeypatch.setattr(
         ledger,
-        "read_signals",
+        "read_signal_observations",
         lambda **_kwargs: [
-            _signal("long", direction="long"),
-            _signal("short", direction="short"),
+            (_signal("long", direction="long"), None, None),
+            (_signal("short", direction="short"), None, None),
         ],
     )
     with pytest.raises(ValueError, match="conflicting signal identities"):
@@ -907,7 +911,8 @@ def test_policy_audit_fails_closed_for_incomplete_or_untrusted_provenance(
         )
     else:
         ledger.connection.execute(
-            "UPDATE signal_policy_provenance SET payload_json = ? WHERE signal_id = ?",
+            "UPDATE policy_audit_records SET payload_json = ? "
+            "WHERE record_type = 'signal_policy_provenance' AND record_id = ?",
             ('{"tampered":true}', first.signal_id),
         )
     _complete_policy_staging(ledger)
@@ -994,7 +999,8 @@ def test_policy_audit_fails_closed_for_tampered_candidate_decision(
         reason_codes=("accepted",),
     )
     ledger.connection.execute(
-        "UPDATE policy_candidate_decisions SET payload_json = ?",
+        "UPDATE policy_audit_records SET payload_json = ? "
+        "WHERE record_type = 'policy_candidate_decision'",
         ('{"tampered":true}',),
     )
     _complete_policy_staging(ledger)
@@ -1202,8 +1208,8 @@ def test_policy_audit_scopes_candidate_validation_to_the_requested_epoch(
     )
     _complete_policy_staging(ledger)
     ledger.connection.execute(
-        """UPDATE policy_candidate_decisions SET payload_json = ?
-           WHERE epoch_id = ?""",
+        """UPDATE policy_audit_records SET payload_json = ?
+           WHERE record_type = 'policy_candidate_decision' AND epoch_id = ?""",
         ('{"tampered":true}', "old-epoch"),
     )
     service = MetricsService(tmp_path, {ledger.cohort_id: ledger})

@@ -161,7 +161,7 @@ def test_decision_store_inherits_capacity_for_encoding_publication_and_loading(o
     bounded = SourceInputStore(shared.cache_dir, accepted_dir=shared.accepted_dir, ttl_s=shared.ttl_s,
         max_bytes=4096, max_nodes=1000)
     monkeypatch.setattr(inputs, 'daily_source_store', lambda *a, **k: (bounded, identity))
-    with pytest.raises(SourceInputError, match='byte limit'):
+    with pytest.raises(SourceInputError, match='byte limit|exceeds max_bytes'):
         clock.prepare_decision_inputs(owner, SESSION, data, digest, lambda: {'oversize': 'x'*6000}, now=lambda: NOW)
 
 
@@ -253,7 +253,7 @@ def test_custom_capacity_applies_when_reading_accepted_enrichment(owner, monkeyp
     bounded = SourceInputStore(shared.cache_dir, accepted_dir=shared.accepted_dir, ttl_s=shared.ttl_s,
         max_bytes=4096, max_nodes=1000)
     monkeypatch.setattr(inputs, 'daily_source_store', lambda *a, **k: (bounded, identity))
-    with pytest.raises(SourceInputError, match='byte limit'):
+    with pytest.raises(SourceInputError, match='byte limit|exceeds max_bytes'):
         clock.prepare_decision_inputs(owner, SESSION, data, digest, forbid)
 
 
@@ -282,7 +282,7 @@ def test_prospective_legacy_decision_store_also_inherits_shared_capacity(owner, 
     bounded = SourceInputStore(shared.cache_dir, accepted_dir=shared.accepted_dir, ttl_s=shared.ttl_s,
         max_bytes=4096, max_nodes=1000)
     monkeypatch.setattr(inputs, 'daily_source_store', lambda *a, **k: (bounded, identity))
-    with pytest.raises(SourceInputError, match='byte limit'):
+    with pytest.raises(SourceInputError, match='byte limit|exceeds max_bytes'):
         clock.prepare_decision_inputs(owner, SESSION, data, digest, lambda: {'oversize': 'x'*6000}, now=lambda: NOW)
 
 

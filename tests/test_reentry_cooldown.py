@@ -1,7 +1,7 @@
 """Re-entry cooldown: block names stopped out within the cooldown window."""
 from unittest.mock import MagicMock
 
-from tradingagents.execution.base_broker import AccountInfo
+from tradingagents.strategies.trading.execution_bridge import AccountInfo
 from tradingagents.strategies.trading.risk_gate import (
     RiskGate,
     RiskGateConfig,

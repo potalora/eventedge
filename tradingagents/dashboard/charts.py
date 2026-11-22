@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Color palette
 BLUE = "#3b82f6"
@@ -72,7 +73,6 @@ def make_cohort_heatmap(
         z.append(row_z)
         text.append(row_t)
 
-    # Check if all values are None/0
     all_none = all(
         (heatmap_data.get(h) or {}).get(s) is None
         for h in HORIZON_LABELS
@@ -115,7 +115,6 @@ def make_regime_timeline(regime_snapshots: list[dict[str, Any]]) -> go.Figure:
     vix = [snap.get("vix_level", 0) for snap in regime_snapshots]
     regimes = [snap.get("overall_regime", "normal") for snap in regime_snapshots]
 
-    # VIX line
     fig.add_trace(
         go.Scatter(
             x=dates,
@@ -131,7 +130,6 @@ def make_regime_timeline(regime_snapshots: list[dict[str, Any]]) -> go.Figure:
         )
     )
 
-    # Regime threshold bands
     max_vix = max(vix) if vix else 40
     y_max = max(max_vix * 1.15, 40)
 
@@ -194,110 +192,10 @@ def make_regime_timeline(regime_snapshots: list[dict[str, Any]]) -> go.Figure:
     return fig
 
 
-def make_capital_bars(deployment_data: list[dict[str, Any]]) -> go.Figure:
-    """Stacked bar chart: deployed vs available capital per size tier."""
-    fig = go.Figure()
-
-    if not deployment_data:
-        fig.update_layout(
-            title="Capital Deployment (no data)", **_DARK_LAYOUT, height=300
-        )
-        return fig
-
-    # Aggregate across horizons per size
-    by_size: dict[str, dict[str, float]] = {}
-    for row in deployment_data:
-        s = row["size"]
-        if s not in by_size:
-            by_size[s] = {"deployed": 0, "total_capital": row["total_capital"]}
-        by_size[s]["deployed"] += row["deployed"]
-
-    sizes = [f"${s.upper()}" if s != "100k" else "$100K" for s in SIZE_KEYS]
-    deployed = [by_size.get(s, {}).get("deployed", 0) for s in SIZE_KEYS]
-    total = [by_size.get(s, {}).get("total_capital", 0) for s in SIZE_KEYS]
-    # Total across 4 horizons
-    total_4h = [t * 4 for t in total]
-    available = [t - d for t, d in zip(total_4h, deployed)]
-
-    fig.add_trace(
-        go.Bar(
-            x=sizes,
-            y=deployed,
-            name="Deployed",
-            marker_color=BLUE,
-            hovertemplate="%{x}: $%{y:,.0f} deployed<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Bar(
-            x=sizes,
-            y=available,
-            name="Available",
-            marker_color=GRAY,
-            hovertemplate="%{x}: $%{y:,.0f} available<extra></extra>",
-        )
-    )
-
-    fig.update_layout(
-        title="Capital Deployment (all horizons combined)",
-        yaxis_title="Capital ($)",
-        barmode="stack",
-        height=350,
-        **_DARK_LAYOUT,
-    )
-    return fig
-
-
-def make_strategy_bars(
-    per_strategy: dict[str, dict[str, Any]],
-) -> go.Figure:
-    """Horizontal bar chart: strategies ranked by signal count, colored by hit rate."""
-    fig = go.Figure()
-
-    if not per_strategy:
-        fig.update_layout(
-            title="Strategy Signals (no data)", **_DARK_LAYOUT, height=400
-        )
-        return fig
-
-    # Sort by signal count descending
-    sorted_strats = sorted(
-        per_strategy.items(),
-        key=lambda x: x[1].get("signals", 0),
-    )
-    names = [s[0].replace("_", " ").title() for s in sorted_strats]
-    signals = [s[1].get("signals", 0) for s in sorted_strats]
-    colors = [GRAY] * len(sorted_strats)
-    hover_text = [
-        f"Governed decisions: {item[1].get('signals', 0)}" for item in sorted_strats
-    ]
-
-    fig.add_trace(
-        go.Bar(
-            y=names,
-            x=signals,
-            orientation="h",
-            marker_color=colors,
-            hovertext=hover_text,
-            hoverinfo="text",
-        )
-    )
-
-    fig.update_layout(
-        title="Signal Volume by Strategy",
-        xaxis_title="Signals (deduplicated across sizes)",
-        height=max(300, len(names) * 35),
-        **_DARK_LAYOUT,
-    )
-    return fig
-
-
 def make_equity_curves_facet(
     history: dict[str, list[dict[str, Any]]],
 ) -> go.Figure:
     """Plot the persisted metric-v2 return series without rebuilding returns."""
-    from plotly.subplots import make_subplots
-
     fig = make_subplots(
         rows=2,
         cols=2,
@@ -344,7 +242,6 @@ def make_equity_curves_facet(
             row=row,
             col=col,
         )
-        # Zero line
         if dates:
             fig.add_hline(
                 y=0,
@@ -360,219 +257,4 @@ def make_equity_curves_facet(
         **_DARK_LAYOUT,
     )
     fig.update_yaxes(title_text="Return", tickformat=".1%")
-    return fig
-
-
-def make_gen_comparison(
-    histories: dict[str, dict[str, list[dict[str, Any]]]],
-    aggregate: str = "mean",
-) -> go.Figure:
-    """Compatibility placeholder: v2 exposes no cross-generation return series."""
-    fig = go.Figure()
-    fig.update_layout(
-        title="Generation comparison unavailable from governed metric-v2 projections",
-        height=380,
-        **_DARK_LAYOUT,
-    )
-    return fig
-
-
-def make_drawdown_chart(snapshots: list[dict[str, Any]], label: str = "") -> go.Figure:
-    """Compatibility placeholder; drawdown must come from PortfolioMetrics."""
-    fig = go.Figure()
-    fig.update_layout(
-        title=f"Governed drawdown unavailable {label}".strip(),
-        height=260,
-        **_DARK_LAYOUT,
-    )
-    return fig
-
-
-def make_strategy_pnl_chart(rows: list[dict[str, Any]]) -> go.Figure:
-    """Stacked horizontal bar: P&L per strategy split by realized/unrealized × long/short."""
-    fig = go.Figure()
-    if not rows:
-        fig.update_layout(title="Strategy P&L (no data)", **_DARK_LAYOUT, height=400)
-        return fig
-
-    # Sort by total
-    rows = sorted(rows, key=lambda r: r["total_pnl"])
-    names = [r["strategy"].replace("_", " ").title() for r in rows]
-
-    components = [
-        ("realized_long", "Realized Long", GREEN),
-        ("unrealized_long", "Unrealized Long", "#86efac"),
-        ("realized_short", "Realized Short", BLUE),
-        ("unrealized_short", "Unrealized Short", "#93c5fd"),
-    ]
-    for key, label, color in components:
-        vals = [r[key] for r in rows]
-        if not any(v != 0 for v in vals):
-            continue
-        fig.add_trace(
-            go.Bar(
-                y=names,
-                x=vals,
-                name=label,
-                orientation="h",
-                marker_color=color,
-                hovertemplate=f"{label}: $%{{x:,.0f}}<extra></extra>",
-            )
-        )
-
-    fig.update_layout(
-        title="Strategy P&L Attribution",
-        xaxis_title="P&L ($)",
-        barmode="relative",
-        height=max(320, len(names) * 32),
-        **_DARK_LAYOUT,
-    )
-    return fig
-
-
-def make_winners_losers_bars(
-    positions: list[dict[str, Any]],
-    top_n: int = 10,
-) -> go.Figure:
-    """Side-by-side: top winners (green) and losers (red) by P&L."""
-    fig = go.Figure()
-    if not positions:
-        fig.update_layout(
-            title="Winners & Losers (no data)", **_DARK_LAYOUT, height=350
-        )
-        return fig
-
-    # Aggregate per (ticker, strategy, direction) across cohorts
-    grouped: dict[tuple, dict] = {}
-    for p in positions:
-        key = (p["ticker"], p["strategy"], p["direction"])
-        d = grouped.setdefault(
-            key,
-            {
-                "ticker": p["ticker"],
-                "strategy": p["strategy"],
-                "direction": p["direction"],
-                "pnl": 0.0,
-            },
-        )
-        d["pnl"] += p["pnl"]
-
-    items = sorted(grouped.values(), key=lambda x: x["pnl"], reverse=True)
-    winners = items[:top_n]
-    losers = sorted([i for i in items if i["pnl"] < 0], key=lambda x: x["pnl"])[:top_n]
-
-    def _label(d: dict) -> str:
-        side = "↓" if d["direction"] == "short" else "↑"
-        return f"{d['ticker']} {side} ({d['strategy'][:8]})"
-
-    if winners:
-        fig.add_trace(
-            go.Bar(
-                y=[_label(w) for w in winners],
-                x=[w["pnl"] for w in winners],
-                orientation="h",
-                marker_color=GREEN,
-                name="Winners",
-                hovertemplate="%{y}<br>P&L: $%{x:,.0f}<extra></extra>",
-            )
-        )
-    if losers:
-        fig.add_trace(
-            go.Bar(
-                y=[_label(loser) for loser in losers],
-                x=[loser["pnl"] for loser in losers],
-                orientation="h",
-                marker_color=RED,
-                name="Losers",
-                hovertemplate="%{y}<br>P&L: $%{x:,.0f}<extra></extra>",
-            )
-        )
-
-    fig.update_layout(
-        title=f"Top {top_n} Winners & Losers (aggregated across cohorts)",
-        xaxis_title="P&L ($)",
-        height=max(400, (len(winners) + len(losers)) * 25),
-        barmode="overlay",
-        **_DARK_LAYOUT,
-    )
-    return fig
-
-
-def make_position_treemap(trades: list[dict[str, Any]]) -> go.Figure:
-    """Treemap of open positions: strategy → ticker, sized by position value."""
-    fig = go.Figure()
-
-    if not trades:
-        fig.update_layout(
-            title="Position Concentration (no data)", **_DARK_LAYOUT, height=400
-        )
-        return fig
-
-    labels = ["Portfolio"]
-    parents = [""]
-    values = [0]
-    colors = [""]
-
-    # Strategy palette
-    strategy_palette = [
-        "#3b82f6",
-        "#22c55e",
-        "#ef4444",
-        "#fbbf24",
-        "#8b5cf6",
-        "#06b6d4",
-        "#f97316",
-        "#ec4899",
-        "#14b8a6",
-        "#a855f7",
-        "#6366f1",
-        "#84cc16",
-    ]
-    strat_color_map: dict[str, str] = {}
-
-    # Group trades by strategy → ticker
-    by_strategy: dict[str, dict[str, float]] = {}
-    for t in trades:
-        strat = t.get("strategy", "unknown")
-        ticker = t.get("ticker", "?")
-        val = t.get("position_value", 0)
-        by_strategy.setdefault(strat, {})
-        by_strategy[strat][ticker] = by_strategy[strat].get(ticker, 0) + val
-
-    for i, (strat, tickers) in enumerate(sorted(by_strategy.items())):
-        strat_label = strat.replace("_", " ").title()
-        color = strategy_palette[i % len(strategy_palette)]
-        strat_color_map[strat] = color
-
-        # Strategy node
-        labels.append(strat_label)
-        parents.append("Portfolio")
-        values.append(0)
-        colors.append(color)
-
-        # Ticker nodes
-        for ticker, val in sorted(tickers.items(), key=lambda x: -x[1]):
-            labels.append(f"{ticker}")
-            parents.append(strat_label)
-            values.append(round(val, 2))
-            colors.append(color)
-
-    fig = go.Figure(
-        go.Treemap(
-            labels=labels,
-            parents=parents,
-            values=values,
-            marker=dict(colors=colors),
-            textinfo="label+value",
-            texttemplate="%{label}<br>$%{value:,.0f}",
-            hovertemplate="%{label}<br>$%{value:,.0f}<extra>%{parent}</extra>",
-            branchvalues="total",
-        )
-    )
-
-    fig.update_layout(
-        title="Position Concentration (by strategy & ticker)",
-        height=450,
-        **_DARK_LAYOUT,
-    )
     return fig

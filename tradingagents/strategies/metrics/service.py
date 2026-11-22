@@ -10,6 +10,10 @@ from types import MappingProxyType
 from typing import Mapping
 
 from tradingagents.strategies.execution.models import SignalRecord
+from tradingagents.strategies.state.generation_db import (
+    GENERATION_DB_FILENAME,
+    GenerationDB,
+)
 from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
     PortfolioLedger,
@@ -52,38 +56,46 @@ class MetricsService:
 
     def __init__(
         self,
-        generation_state_dir: str | Path,
+        generation_state_dir: str | Path | GenerationDB,
         cohort_ledgers: Mapping[str, PortfolioLedger],
         *,
         read_only: bool = False,
+        store: MetricStore | None = None,
     ) -> None:
         bindings = dict(cohort_ledgers)
-        seen_bindings: dict[str, str] = {}
-        seen_databases: dict[tuple[int, int], str] = {}
         for cohort_id, ledger in bindings.items():
             if not cohort_id or ledger.cohort_id != cohort_id:
                 raise ValueError(
                     "cohort binding key must exactly match ledger.cohort_id"
                 )
-            binding_id = ledger.recovery_binding_id()
-            if not isinstance(binding_id, str) or not binding_id:
-                raise ValueError("ledger recovery binding identity is invalid")
-            stat = Path(ledger.path).stat()
-            database_id = (stat.st_dev, stat.st_ino)
-            if binding_id in seen_bindings or database_id in seen_databases:
-                raise ValueError(
-                    "multiple cohort IDs reference the same ledger database"
-                )
-            seen_bindings[binding_id] = cohort_id
-            seen_databases[database_id] = cohort_id
-        self.generation_state_dir = Path(generation_state_dir)
         self._cohort_ledgers = MappingProxyType(bindings)
-        metric_store_path = self.generation_state_dir / "metrics_v2.sqlite3"
-        self.store = (
-            MetricStore.open_existing(metric_store_path)
-            if read_only
-            else MetricStore(metric_store_path)
-        )
+        if isinstance(generation_state_dir, GenerationDB):
+            self.generation_state_dir = generation_state_dir.path.parent
+            if store is not None:
+                self.store = store
+            else:
+                self.store = (
+                    MetricStore.open_existing(generation_state_dir)
+                    if read_only or generation_state_dir.readonly
+                    else MetricStore(generation_state_dir)
+                )
+        else:
+            self.generation_state_dir = Path(generation_state_dir)
+            if store is not None:
+                self.store = store
+            else:
+                unified_path = self.generation_state_dir / GENERATION_DB_FILENAME
+                legacy_path = self.generation_state_dir / "metrics_v2.sqlite3"
+                target = (
+                    unified_path
+                    if unified_path.is_file() or not legacy_path.is_file()
+                    else legacy_path
+                )
+                self.store = (
+                    MetricStore.open_existing(target)
+                    if read_only
+                    else MetricStore(target)
+                )
 
     @property
     def cohort_ids(self) -> tuple[str, ...]:
@@ -142,7 +154,7 @@ class MetricsService:
         try:
             snapshots = tuple(ledger.read_snapshots(epoch_id=epoch_id))
             benchmarks = tuple(ledger.read_benchmark_observations(epoch_id=epoch_id))
-            signals = tuple(ledger.read_signals(epoch_id=epoch_id))
+            signal_observations = ledger.read_signal_observations(epoch_id=epoch_id)
             window = (
                 validate_snapshot_series(
                     cohort_id=cohort_id,
@@ -157,8 +169,9 @@ class MetricsService:
                 )
             )
             deduped = deduplicate_signals(
-                self._metric_signal(row, *(ledger.signal_observation(row.signal_id) or (None, None, None))[1:])
-                for row in signals)
+                self._metric_signal(row, obs, journal)
+                for row, obs, journal in signal_observations
+            )
             if deduped.conflicts:
                 raise ValueError("conflicting signal identities")
             fills = (
@@ -265,12 +278,13 @@ class MetricsService:
                 )
             staging_rows = connection.execute(
                 """SELECT r.session, r.policy_id, r.epoch_id AS staging_epoch_id,
-                          b.epoch_id AS binding_epoch_id, b.policy_version,
-                          b.context_digest
+                          b.epoch_id AS binding_epoch_id,
+                          json_extract(b.payload_json, '$.policy_version') AS policy_version
                    FROM staging_runs r
-                   JOIN policy_session_contexts b
-                     ON b.cohort_id = r.cohort_id AND b.session = r.session
-                    AND b.binding_kind = 'staging'
+                   JOIN policy_audit_records b
+                     ON b.cohort_id = r.cohort_id
+                    AND b.record_type = 'policy_session_context'
+                    AND b.record_id = (r.session || ':staging')
                    WHERE r.cohort_id = ? AND r.epoch_id = ?
                    ORDER BY r.session, r.policy_id LIMIT ?""",
                 (cohort_id, epoch_id, _POLICY_AUDIT_MAX_RECORDS + 1),
@@ -454,9 +468,10 @@ class MetricsService:
         calculator = OutcomeCalculator()
         for cohort_id in self.cohort_ids:
             ledger = self._ledger(cohort_id)
-            signals = tuple(self._metric_signal(
-                row, *(ledger.signal_observation(row.signal_id) or (None, None, None))[1:]
-            ) for row in ledger.read_signals())
+            signals = tuple(
+                self._metric_signal(row, obs, journal)
+                for row, obs, journal in ledger.read_signal_observations()
+            )
             dates = [row.reference_session for row in signals]
             dates.extend(row.session for row in ledger.read_snapshots())
             latest_attempt = ledger.connection.execute(

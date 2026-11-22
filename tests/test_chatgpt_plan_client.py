@@ -10,7 +10,7 @@ def test_plan_descriptor_contains_no_credentials_and_missing_profile_fails(monke
     fake = SimpleNamespace(read_profile_identity=lambda path, **kwargs: 'profile-one')
     monkeypatch.setitem(sys.modules, 'tradingagents.strategies.plan_auth', fake)
     config = {'autoresearch': {'llm_billing_mode': 'chatgpt_plan'}}
-    client = configured_plan_client(config, 'gpt-6-astra')
+    client = configured_plan_client(config, 'gpt-6.2-sol')
     assert client.profile_identity == 'profile-one'
     assert not hasattr(client, 'api_key')
     assert 'profile-one' not in repr(client)
@@ -18,7 +18,7 @@ def test_plan_descriptor_contains_no_credentials_and_missing_profile_fails(monke
         configured_plan_client(config, 'claude-sonnet-5')
     fake.read_profile_identity = lambda path, **kwargs: (_ for _ in ()).throw(RuntimeError('profile unavailable'))
     with pytest.raises(RuntimeError):
-        configured_plan_client(config, 'gpt-6-astra')
+        configured_plan_client(config, 'gpt-6.2-sol')
 
 
 def test_api_mode_is_explicit_and_plan_guard_rejects_paid_clients(monkeypatch):
@@ -52,11 +52,11 @@ def test_plan_descriptor_uses_disposable_worker_without_parent_sdk_or_token(monk
     payloads = []
     def send(payload, timeout):
         payloads.append(payload)
-        return {'text': '{}', 'provenance': {'configured_model': 'gpt-6-astra', 'billing_mode': 'chatgpt_plan'}}
+        return {'text': '{}', 'provenance': {'configured_model': 'gpt-6.2-sol', 'billing_mode': 'chatgpt_plan'}}
     monkeypatch.setattr(llm_utils, 'bounded_transport', send)
     provenance = {}
     result = llm_utils.call_analysis_model(ChatGPTPlanClient('/private/profile.json', 'profile-one'),
-        model='gpt-6-astra', system='exact system', prompt='exact evidence',
+        model='gpt-6.2-sol', system='exact system', prompt='exact evidence',
         max_tokens=100, temperature=0, effort='high', provenance=provenance)
     assert result == '{}'
     assert payloads[0]['provider'] == 'chatgpt_plan'
@@ -102,7 +102,7 @@ def test_worker_uses_only_own_oauth_token_and_blocks_redirects_and_paid_environm
 def _payload():
     return {'kind': 'model', 'provider': 'chatgpt_plan', 'timeout': 3,
         'client': {'auth_path': None, 'profile_identity': 'profile-one'},
-        'request': {'model': 'gpt-6-astra', 'system': 'sys', 'prompt': 'prompt',
+        'request': {'model': 'gpt-6.2-sol', 'system': 'sys', 'prompt': 'prompt',
                     'effort': 'high', 'max_tokens': 100, 'temperature': 0}}
 
 
@@ -150,7 +150,7 @@ def test_real_sdk_worker_omits_paid_tenant_headers_and_never_follows_redirect(mo
                 self.send_header('Location', f'http://127.0.0.1:{self.server.server_port}/leak')
             else:
                 event = {'type': 'response.completed', 'response': {'id': 'offline', 'status': 'completed',
-                    'model': 'gpt-6-astra', 'output': [{'id': 'msg', 'type': 'message', 'role': 'assistant',
+                    'model': 'gpt-6.2-sol', 'output': [{'id': 'msg', 'type': 'message', 'role': 'assistant',
                     'status': 'completed', 'content': [{'type': 'output_text', 'text': '{}', 'annotations': []}]}]}}
                 body = ('data: '+json.dumps(event)+'\n\ndata: [DONE]\n\n').encode()
                 self.send_response(200)

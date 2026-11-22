@@ -33,7 +33,6 @@ from tradingagents.strategies.execution.price_source import (
     AdjustedClose,
     BarValidationError,
     PriceSource,
-    YFinancePriceSource,
     SIP_PRICING_VERSION,
     validate_adjusted_closes,
     paired_adjusted_closes,
@@ -268,8 +267,22 @@ class SessionExecutor:
         self.policy_enabled = size_profile is not None and isinstance(
             policy_settings, dict
         )
+        effective_policy_settings = policy_settings
+        if (
+            self.policy_enabled
+            and "congressional_exposure_pct"
+            in getattr(PortfolioPolicyConfig, "__dataclass_fields__", {})
+            and "congressional_exposure_by_size" not in policy_settings
+            and hasattr(size_profile, "name")
+        ):
+            effective_policy_settings = {
+                **policy_settings,
+                "congressional_exposure_by_size": {size_profile.name: 0.0},
+            }
         self.portfolio_policy_config = (
-            PortfolioPolicyConfig.from_size_profile(size_profile, policy_settings)
+            PortfolioPolicyConfig.from_size_profile(
+                size_profile, effective_policy_settings
+            )
             if self.policy_enabled
             else None
         )
@@ -391,181 +404,9 @@ class SessionExecutor:
         }
 
     def _staging_volatility_epoch_matches(self, binding, reference_session, epoch_id):
-        """Allow only original accepted risk evidence across the proved retirement.
-
-        The old accepted shared seal independently witnesses the entire original
-        epoch/configuration. No general permission to reuse another epoch is
-        inferred from a policy version, old signal, or self-consistent SQL row.
-        """
-        if binding['epoch_id'] == epoch_id:
-            return True
-        if not isinstance(self.config.get('source_retirement'), dict):
-            return False
-        try:
-            from tradingagents.default_config import DEFAULT_CONFIG
-            from .generation_config import read_generation_config, apply_generation_config, _pairs
-            from .source_retirement import validate_generation_retirement, validate_code_revision, generation_for_session
-            from .source_retirement_profile import profile_binding
-            from . import shared_execution as shared
-            from .source_inputs import (
-                daily_source_store, public_source_configuration_declaration,
-                PUBLIC_CONFIGURATION_KEY, MAX_BYTES,
-            )
-
-            state = self.metric_store.path.parent
-            if len(state.parents) < 3 or state.resolve() != state:
-                return False
-            repo = state.parents[2]
-            manifest = state.parent / 'manifest.json'
-            if any(path.is_symlink() for path in (manifest, *manifest.parents)):
-                return False
-            descriptor = os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(descriptor, 'rb') as handle:
-                info = os.fstat(handle.fileno())
-                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 2 * 1024 * 1024:
-                    return False
-                raw = handle.read(2 * 1024 * 1024 + 1)
-                if len(raw) > 2 * 1024 * 1024:
-                    return False
-            rows = json.loads(raw, object_pairs_hook=_pairs)['generations']
-            matches = [row for row in rows if row.get('gen_id') == state.name]
-            if len(matches) != 1:
-                return False
-            row = matches[0]
-            amendment = validate_generation_retirement(row, repo=repo)
-            revision = validate_code_revision(row, repo=repo)
-            if amendment is None or self.ledger.path != state / self.ledger.cohort_id / 'portfolio.db':
-                return False
-            _, frozen, _ = read_generation_config(row['config_file'], row['config_sha256'])
-            proof = profile_binding(frozen, row['config_sha256'])
-            original, _, _ = read_generation_config(amendment['previous_config_file'], amendment['previous_config_sha256'])
-            if (proof is None or proof['effective_session'] != amendment['effective_session']
-                    or proof['previous_config_sha256'] != amendment['previous_config_sha256']
-                    or proof['previous_config_text'].encode('utf-8') != original
-                    or self.config['source_retirement'] != frozen['source_retirement']):
-                return False
-            previous = self.metric_store.load_epoch(binding['epoch_id'])
-            current = self.metric_store.load_epoch(epoch_id)
-            old_selected = generation_for_session(row, reference_session.isoformat())
-            selected_current = generation_for_session(row, current.start_session.isoformat())
-            edges = {(amendment['previous_commit'], amendment['commit']): amendment['effective_session']}
-            if revision is not None:
-                edges[(revision['previous_commit'], revision['commit'])] = revision['effective_session']
-            pair = (previous.generation_commit, current.generation_commit)
-            effective = date.fromisoformat(edges.get(pair, revision['effective_session'] if revision else amendment['effective_session']))
-            adjacent = previous.end_session == previous_session(current.start_session)
-            if revision is not None and pair == (amendment['previous_commit'], revision['commit']):
-                # A pending original signal may span the intermediate retired
-                # epoch. Prove both recorded adjacent boundaries, never skip an
-                # unknown epoch merely because the final policy looks similar.
-                with self.metric_store._connect() as connection:
-                    epochs = [self.metric_store._epoch(item[0]) for item in connection.execute('SELECT payload_json FROM metric_epochs')]
-                middle = [item for item in epochs if previous.start_session < item.start_session < current.start_session]
-                if len(middle) != 1:
-                    return False
-                bridge = middle[0]
-                adjacent = (bridge.generation_id == row['gen_id'] and bridge.generation_commit == amendment['commit']
-                    and bridge.status == 'closed' and bridge.boundary_reason == 'semantic_hash_changed'
-                    and bridge.start_session >= date.fromisoformat(amendment['effective_session'])
-                    and previous.end_session == previous_session(bridge.start_session)
-                    and bridge.end_session == previous_session(current.start_session)
-                    and bridge.config_hash == current.config_hash
-                    and all(getattr(bridge,key)==getattr(current,key) for key in
-                        ('metric_schema_version','execution_clock_version','pricing_version','cost_model_version')))
-            elif pair not in edges:
-                return False
-            if revision is not None and pair == (revision['previous_commit'], revision['commit']) and previous.config_hash != current.config_hash:
-                return False
-            if (previous.generation_id != row['gen_id'] or current.generation_id != row['gen_id']
-                    or previous.generation_commit != old_selected['git_commit']
-                    or current.generation_commit != selected_current['git_commit']
-                    or previous.status != 'closed' or previous.end_session is None
-                    or previous.boundary_reason != 'semantic_hash_changed'
-                    or not previous.start_session <= reference_session <= previous.end_session
-                    or not reference_session < effective <= current.start_session
-                    or not adjacent
-                    or current.status not in {'open', 'closed'}
-                    or any(getattr(previous, key) != getattr(current, key) for key in
-                        ('metric_schema_version', 'execution_clock_version', 'pricing_version', 'cost_model_version'))):
-                return False
-            old_config = apply_generation_config(DEFAULT_CONFIG, old_selected['config_file'], old_selected['config_sha256'])
-            old_config['autoresearch']['state_dir'] = str(state)
-            owner = SimpleNamespace(_base_config=old_config, _metric_epoch_context=previous)
-            # Historical credentials need not remain usable or unchanged. Join
-            # the recorded private source hash through the original accepted
-            # envelope and its independently reproducible public behavior proof.
-            source_store, expected_identity = daily_source_store(owner, reference_session.isoformat())
-            source_path = source_store._path(expected_identity, frozen=True)
-            if any(path.is_symlink() for path in (source_path, *source_path.parents)):
-                return False
-            descriptor = os.open(source_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            with os.fdopen(descriptor, 'rb') as handle:
-                info = os.fstat(handle.fileno())
-                limit = source_store.codec_limits.get('max_bytes') or MAX_BYTES
-                if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= limit:
-                    return False
-                body = handle.read(limit + 1)
-                if len(body) > limit:
-                    return False
-            envelope = source_store.decode(body.decode('utf-8'), **source_store.codec_limits)
-            accepted_identity = envelope['identity']
-            if (set(accepted_identity) != set(expected_identity)
-                    or any(accepted_identity[key] != value for key, value in expected_identity.items() if key != 'configuration')
-                    or type(accepted_identity['configuration']) is not str
-                    or len(accepted_identity['configuration']) != 64
-                    or any(character not in 'abcdef0123456789' for character in accepted_identity['configuration'])):
-                return False
-            accepted_sources = source_store.load_frozen(accepted_identity)
-            declaration = public_source_configuration_declaration(old_config)
-            if (not isinstance(accepted_sources, Mapping)
-                    or accepted_sources.get(PUBLIC_CONFIGURATION_KEY) != declaration[PUBLIC_CONFIGURATION_KEY]):
-                return False
-            seal_store, seal_identity = shared._store(owner, reference_session)
-            seal_identity['configuration'] = accepted_identity['configuration']
-            seal = seal_store.load_frozen(seal_identity)
-            if (not isinstance(seal, Mapping) or set(seal) != shared.FIELDS
-                    or seal['version'] != shared.VERSION or seal['session'] != reference_session
-                    or seal['profile_sha256'] != old_selected['config_sha256']
-                    or seal['configuration'] != accepted_identity['configuration']
-                    or type(seal['effective_configuration']) is not str
-                    or len(seal['effective_configuration']) != 64
-                    or any(character not in 'abcdef0123456789' for character in seal['effective_configuration'])
-                    or seal['bundle_sha256'] != shared._digest(seal['bundle'])
-                    or set(seal['epoch']) != set(shared.EPOCH)
-                    or seal['epoch']['status'] != 'open' or seal['epoch']['end_session'] is not None
-                    or any(seal['epoch'][key] != getattr(previous, key) for key in shared.EPOCH
-                        if key not in {'status', 'end_session', 'boundary_reason'})):
-                return False
-            # Validate static schema and observations, without comparing old
-            # financial preconditions to naturally changed current books.
-            from .operating_contract import ROSTER
-            if set(seal['books']) != set(ROSTER):
-                return False
-            shared.deserialize_execution_bundle(seal['bundle'], seal['accepted_at'])
-            for named_book in seal['books'].values():
-                shared._fields(named_book, shared.BOOK)
-                shared._fields(named_book['prepared'], shared.PREPARED)
-            book = seal['books'][self.ledger.cohort_id]
-            identity = book['identity']
-            policy = self.ledger_config.get('policy_id')
-            if (not isinstance(policy, str) or policy != old_config['autoresearch']['paper_ledger']['policy_id']
-                    or identity['cohort_id'] != self.ledger.cohort_id
-                    or identity['ledger_cohort_id'] != self.ledger.cohort_id
-                    or identity['horizon'] != self.ar_config['horizon']
-                    or identity['size_profile'] != self.size_profile.name
-                    or identity['policy_id'] != policy):
-                return False
-            old_semantics = dict(book['prepared']['config'])
-            if identity['semantic_config_digest'] != stable_id('session_execution_config', old_semantics):
-                return False
-            old_audit = old_config['autoresearch'].get('congress_audit_continuity_policy')
-            if old_semantics.pop('congress_audit_continuity_policy', None) != old_audit:
-                return False
-            canonical = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
-            return (canonical(old_semantics) == canonical(self.semantic_policy_document())
-                    and binding['policy_config_json'] == canonical(self.portfolio_policy_document()))
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
-            return False
+        """Return True when the persisted staging binding matches the active epoch."""
+        _ = reference_session
+        return binding["epoch_id"] == epoch_id
 
     def _resolve_staged_volatility_evidence(
         self, session: date, epoch_id: str
@@ -944,14 +785,6 @@ class SessionExecutor:
         ):
             raise ValueError("incomplete governed market-data governance context")
         if governed_context and tickers:
-            sip_source = None
-            if isinstance(price_source, YFinancePriceSource):
-                from tradingagents.strategies.execution.alpaca_daily_bar import AlpacaHistoricalSIPSource
-
-                sip_source = AlpacaHistoricalSIPSource()
-            resolver_options = (
-                {"alpaca_sip_source": sip_source} if sip_source is not None else {}
-            )
             resolved = resolve_governed_bars(
                 price_source=price_source,
                 metric_store=metric_store,
@@ -961,7 +794,6 @@ class SessionExecutor:
                 cohort_ids_by_ticker=cohort_ids_by_ticker,
                 processed_at=processed_at,
                 persist=persist,
-                **resolver_options,
             )
             bars = {(ticker, session): bar for ticker, bar in resolved.bars.items()}
             recoveries = resolved.recovery_bindings
@@ -1892,13 +1724,6 @@ class SessionExecutor:
         for policy_key in ("stabilization_profile_policy", "source_capability_policy"):
             if policy_key in self.ar_config:
                 semantic_inputs[policy_key] = self.ar_config[policy_key]
-        from .enrichment_capabilities import configured as enrichment_configured
-        if enrichment_configured(self.ar_config):
-            for policy_key in ("enrichment_capability_policy", "retired_enrichment_capabilities"):
-                semantic_inputs[policy_key] = self.ar_config[policy_key]
-        from .congress_audit_continuity import configured as congress_continuity_configured
-        if congress_continuity_configured(self.ar_config):
-            semantic_inputs['congress_audit_continuity_policy'] = self.ar_config['congress_audit_continuity_policy']
         if self.pricing_version == SIP_PRICING_VERSION:
             # Bind current provider and benchmark semantics against same-session
             # source-policy substitution.

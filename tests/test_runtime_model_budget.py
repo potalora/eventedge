@@ -148,16 +148,16 @@ def test_committee_deadline_holds_cash_without_rule_selection(monkeypatch):
 
 def test_analyzer_selects_role_without_mutating_configured_models(monkeypatch):
     from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-    analyzer = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna", "llm_effort": "high", "thesis_model": "gpt-6-astra", "thesis_effort": "high"}})
+    analyzer = LLMAnalyzer({"autoresearch": {"autoresearch_model": "gpt-6-luna", "llm_effort": "high", "thesis_model": "gpt-6.2-sol", "thesis_effort": "high"}})
     seen = []
     monkeypatch.setattr(analyzer, "_get_client", lambda: SimpleNamespace())
     def call(client, **kwargs):
         seen.append((kwargs["model"], kwargs["effort"]))
         return '{"direction":"neutral","score":0.2}'
     monkeypatch.setattr("tradingagents.strategies.llm_utils.call_analysis_model", call)
-    analyzer.analyze_filing_change("new", "prior", "DAL")
+    analyzer.analyze_supply_chain("Fuel shock", "Summary", "DAL", ["UAL"])
     analyzer.analyze_commodity_macro("GLD", "gold", {}, {})
-    assert seen == [("gpt-6-astra", "high"), ("gpt-6-luna", "high")]
+    assert seen == [("gpt-6.2-sol", "high"), ("gpt-6-luna", "high")]
     assert analyzer._model_name == "gpt-6-luna"
 
 
@@ -209,7 +209,7 @@ def test_native_responses_success_preserves_public_identity_and_client_headers()
             observed["headers"] = {key.lower(): value for key, value in self.headers.items()}
             observed["request"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             body = json.dumps({"id":"resp_local","object":"response","created_at":1,"status":"completed",
-                               "model":"gpt-6-astra","model_revision":"provider-revision-7",
+                               "model":"gpt-6.2-sol","model_revision":"provider-revision-7",
                                "output":[{"id":"msg_1","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"{}","annotations":[]}]}]}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -224,7 +224,7 @@ def test_native_responses_success_preserves_public_identity_and_client_headers()
     try:
         with OpenAI(api_key="offline-private", base_url=f"http://127.0.0.1:{server.server_port}/v1", organization="org_fixture", project="proj_fixture", default_headers={"X-EventEdge-Test":"retained"}) as client:
             with model_budget(time.monotonic()+5):
-                text = call_analysis_model(client, model="gpt-6-astra", system="sys", prompt="hi", max_tokens=10, temperature=0, effort="high", provenance=provenance)
+                text = call_analysis_model(client, model="gpt-6.2-sol", system="sys", prompt="hi", max_tokens=10, temperature=0, effort="high", provenance=provenance)
         assert text == "{}"
         assert observed["headers"]["authorization"] == "Bearer offline-private"
         assert observed["headers"]["x-eventedge-test"] == "retained"
@@ -406,7 +406,7 @@ def test_native_anthropic_transport_preserves_configured_client_and_provenance()
         def do_POST(self):
             observed["headers"] = {key.lower(): value for key, value in self.headers.items()}
             observed["request"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            body = json.dumps({"id":"msg_local", "type":"message", "role":"assistant", "model":"claude-sonnet-5",
+            body = json.dumps({"id":"msg_local", "type":"message", "role":"assistant", "model":"claude-sonnet-4-6",
                 "content":[{"type":"text","text":"{}"}], "stop_reason":"end_turn", "stop_sequence":None,
                 "usage":{"input_tokens":1,"output_tokens":1}}).encode()
             self.send_response(200)
@@ -422,12 +422,12 @@ def test_native_anthropic_transport_preserves_configured_client_and_provenance()
     try:
         with Anthropic(api_key="offline-private", base_url=f"http://127.0.0.1:{server.server_port}", default_headers={"X-EventEdge-Test":"retained"}) as client:
             with model_budget(time.monotonic()+5):
-                text = call_analysis_model(client, model="claude-sonnet-5", system="s", prompt="p", max_tokens=10, temperature=0, effort="high", provenance=provenance)
+                text = call_analysis_model(client, model="claude-sonnet-4-6", system="s", prompt="p", max_tokens=10, temperature=0, effort="high", provenance=provenance)
         assert text == "{}"
         assert observed["headers"]["x-api-key"] == "offline-private"
         assert observed["headers"]["x-eventedge-test"] == "retained"
-        assert observed["request"]["output_config"] == {"effort":"high"}
-        assert provenance["returned_model"] == "claude-sonnet-5"
+        assert observed["request"]["output_config"] == {"effort": "high"}
+        assert provenance["returned_model"] == "claude-sonnet-4-6"
         assert provenance["identity_status"] == "unpinned"
     finally:
         server.shutdown()
@@ -476,3 +476,101 @@ def test_filtered_timeout_horizon_holds_earlier_and_retained_late_samples(tmp_pa
     assert all(s["journal_only"] for s in all_signals)
     assert all(s["metadata"]["analysis_failure_reason"] == "model_deadline_exhausted" for s in all_signals)
     assert all(row.status=="data_failure" for _,_,health in persisted for row in health)
+
+
+def test_transport_worker_pool_reuses_worker_within_phase():
+    from tradingagents.strategies import runtime_deadline
+    from tradingagents.strategies.runtime_deadline import bounded_transport, model_budget
+    calls = []
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            calls.append(req["input"])
+            body = json.dumps({"id": f"resp_{len(calls)}", "object": "response", "created_at": 1, "status": "completed",
+                               "model": "gpt-6.2-sol", "model_revision": "rev-1",
+                               "output": [{"id": "msg_1", "type": "message", "status": "completed", "role": "assistant",
+                                           "content": [{"type": "output_text", "text": str(len(calls)), "annotations": []}]}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with model_budget(time.monotonic() + 15):
+            pool = runtime_deadline._CURRENT_WORKER_POOL.get()
+            assert pool is not None
+            for idx in range(3):
+                out = bounded_transport({
+                    "kind": "model",
+                    "provider": "openai",
+                    "client": {"api_key": "offline-key", "base_url": f"http://127.0.0.1:{server.server_port}/v1"},
+                    "request": {"model": "gpt-6.2-sol", "system": "sys", "prompt": f"p{idx}", "max_tokens": 8, "temperature": 0.0, "effort": "high"},
+                    "timeout": 5.0,
+                }, timeout=5.0)
+                assert out["text"] == str(idx + 1)
+            assert pool.spawn_count == 1
+        assert calls == ["p0", "p1", "p2"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_transport_worker_pool_sigkills_hung_worker_and_respawns():
+    from tradingagents.strategies.runtime_deadline import TransportWorkerPool
+    hang = threading.Event()
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+        def do_POST(self):
+            req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            prompt = req["input"]
+            if prompt == "hang":
+                hang.wait(timeout=5.0)
+                return
+            body = json.dumps({"id": "resp_ok", "object": "response", "created_at": 1, "status": "completed",
+                               "model": "gpt-6.2-sol", "model_revision": "rev-1",
+                               "output": [{"id": "msg_1", "type": "message", "status": "completed", "role": "assistant",
+                                           "content": [{"type": "output_text", "text": "recovered", "annotations": []}]}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    pool = TransportWorkerPool(max_workers=1)
+    try:
+        with pytest.raises(TimeoutError, match="transport_deadline_exhausted"):
+            pool.execute({
+                "kind": "model",
+                "provider": "openai",
+                "client": {"api_key": "offline-key", "base_url": f"http://127.0.0.1:{server.server_port}/v1"},
+                "request": {"model": "gpt-6.2-sol", "system": "sys", "prompt": "hang", "max_tokens": 8, "temperature": 0.0, "effort": "high"},
+                "timeout": 5.0,
+            }, timeout=0.4)
+        assert pool.spawn_count == 1
+        assert len(pool._idle) == 0 and len(pool._active) == 0
+        out = pool.execute({
+            "kind": "model",
+            "provider": "openai",
+            "client": {"api_key": "offline-key", "base_url": f"http://127.0.0.1:{server.server_port}/v1"},
+            "request": {"model": "gpt-6.2-sol", "system": "sys", "prompt": "ok", "max_tokens": 8, "temperature": 0.0, "effort": "high"},
+            "timeout": 5.0,
+        }, timeout=5.0)
+        assert out["text"] == "recovered"
+        assert pool.spawn_count == 2
+    finally:
+        hang.set()
+        pool.close()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

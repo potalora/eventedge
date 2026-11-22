@@ -2488,11 +2488,25 @@ def run_candidate_volatility_validation(
             )
             _finish_volatility_validation(state)
             return None
-        if state.completed or any(
-            cohort["ledger"].read_policy_session_context(
-                state.session, binding_kind="staging"
-            ) is not None
-            for cohort in state.owner.cohorts
+        staging_marker = f"staging_began:{state.epoch_id}:{state.session}"
+        owner_cohorts = getattr(state.owner, "cohorts", ())
+        if (
+            state.completed
+            or any(
+                cohort["ledger"].read_policy_session_context(
+                    state.session, binding_kind="staging"
+                )
+                is not None
+                for cohort in owner_cohorts
+            )
+            or (
+                bool(owner_cohorts)
+                and owner_cohorts[0]["ledger"]._connection.execute(
+                    "SELECT 1 FROM schema_metadata WHERE metadata_key = ?",
+                    (staging_marker,),
+                ).fetchone()
+                is not None
+            )
         ):
             raise ValueError("accepted staging volatility missing after staging began")
         from .runtime_recovery import require_acquisition_allowed
@@ -2617,12 +2631,24 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     staging_valid = not (
         state.candidate_bar_quarantines or state.volatility_quarantines
     )
-    for horizon, (_, regime, _) in state.horizon_signals.items():
+    if state.horizon_signals:
+        selected_horizon = (
+            "3m" if "3m" in state.horizon_signals else sorted(state.horizon_signals)[0]
+        )
+        owner_horizons = {
+            c["config"].horizon for c in getattr(state.owner, "cohorts", ())
+        }
+        canonical_horizon = (
+            "3m"
+            if "3m" in owner_horizons
+            else (sorted(owner_horizons)[0] if owner_horizons else selected_horizon)
+        )
+        _, regime, _ = state.horizon_signals[selected_horizon]
         state.first_engine.state.save_regime_snapshot(
             regime,
             session=state.session,
             epoch_id=state.epoch_id,
-            horizon=horizon,
+            horizon=canonical_horizon,
             execution_valid=True,
             staging_valid=staging_valid,
             candidate_bar_quarantines=tuple(state.candidate_bar_quarantines),
@@ -2661,16 +2687,8 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
         try:
             return state.owner._fetch_openbb_enrichment(all_signals)
         except SourceFetchError as error:
-            if not resilience:
-                raise
-            # Only typed provider failures cross this boundary. Codec, identity,
-            # accounting and unexpected internal exceptions remain hard failures.
-            from .enrichment_capabilities import declaration
-            from tradingagents.strategies.modules.commodity_macro import ETF_TO_FUTURES_UNDERLYING
-            return {**declaration(state.owner._base_config.get('autoresearch', {}), {
-                ETF_TO_FUTURES_UNDERLYING[signal['ticker']] for signal in all_signals
-                if ETF_TO_FUTURES_UNDERLYING.get(signal.get('ticker'))}),
-                'errors': {'openbb': {'reason_code': error.reason_code}}}
+            # Tier-2 optional enrichment failure never aborts staging.
+            return {'errors': {'openbb': {'reason_code': error.reason_code, 'status': 'unavailable'}}}
     try:
         with provider_budget("openbb", state.model_deadline):
             enrichment, decision_context = prepare_decision_inputs(
@@ -2686,10 +2704,78 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     reference_bars = dict(state.governed_reference_bars)
     reference_bars.update(state.candidate_reference_bars)
     state.shared_data["_execution_reference_bars"] = reference_bars
+
+    # 1 committee synthesis call per horizon (4/day, not 16/day).
+    # Each size tier (5k/10k/50k/100k) then applies deterministic PortfolioPolicy sizing.
+    from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+    from .research_resilience import project_enrichment
+    horizon_enrichment = project_enrichment(enrichment)[0] if resilience else enrichment
+    horizon_committee_cache: dict[str, tuple[list[Any], dict[str, Any]]] = {}
+    if hasattr(PortfolioCommittee, "synthesize_horizon"):
+        if state.valid:
+            staging_marker = f"staging_began:{state.epoch_id}:{state.session}"
+            conn = getattr(state.valid[0].get("ledger"), "_connection", None)
+            if conn is not None:
+                with conn:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO schema_metadata (metadata_key, metadata_value) VALUES (?, '1')",
+                        (staging_marker,),
+                    )
+        seen_horizons = sorted({c["config"].horizon for c in state.valid})
+        for h in seen_horizons:
+            h_signals, h_regime, _ = state.horizon_signals[h]
+            h_cohorts = [c for c in state.valid if c["config"].horizon == h]
+            if h_cohorts and all(
+                callable(getattr(c.get("ledger"), "committee_decision", None))
+                and c["ledger"].committee_decision(
+                    state.session,
+                    state.epoch_id,
+                    c["engine"].ar_config.get("paper_ledger", {}).get("policy_id")
+                    or state.owner._policy_id_for_horizon(h),
+                )
+                is not None
+                for c in h_cohorts
+            ):
+                continue
+            h_committee_cfg = state.owner._base_config
+            if h_cohorts and all(
+                not getattr(c["engine"], "config", {}).get("autoresearch", {}).get("paper_trade", {}).get("portfolio_committee_enabled", True)
+                for c in h_cohorts
+            ):
+                h_committee_cfg = {
+                    **state.owner._base_config,
+                    "autoresearch": {
+                        **state.owner._base_config.get("autoresearch", {}),
+                        "paper_trade": {
+                            **state.owner._base_config.get("autoresearch", {}).get("paper_trade", {}),
+                            "portfolio_committee_enabled": False,
+                        },
+                    },
+                }
+            h_committee = PortfolioCommittee(h_committee_cfg)
+            with model_budget(state.model_deadline):
+                h_recs = h_committee.synthesize_horizon(
+                    horizon=h,
+                    signals=h_signals,
+                    regime=h_regime,
+                    enrichment=horizon_enrichment,
+                    model_coverage=state.model_coverage,
+                )
+            h_status = dict(
+                getattr(h_committee, "last_decision_status", None)
+                or {
+                    "status": "selected" if h_recs else "no_candidates",
+                    "model_coverage": dict(state.model_coverage or {"complete": True}),
+                    "shared_horizon_synthesis": True,
+                }
+            )
+            horizon_committee_cache[h] = (list(h_recs), h_status)
+
     for cohort in state.valid:
         cfg, engine = cohort["config"], cohort["engine"]
         signals, regime, _ = state.horizon_signals[cfg.horizon]
         summaries = state.governed_summaries_by_cohort.get(cfg.name, [])
+        h_cached = horizon_committee_cache.get(cfg.horizon)
         try:
             with model_budget(state.model_deadline):
                 staged = engine.screen_and_stage(
@@ -2702,6 +2788,8 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                     marked_account=cohort["marked_account"],
                     annualized_volatility_evidence=state.shared_volatility_evidence,
                     model_coverage=state.model_coverage,
+                    horizon_recommendations=h_cached[0] if h_cached is not None else None,
+                    horizon_decision_status=h_cached[1] if h_cached is not None else None,
                 )
             fills = cohort["ledger"].read_fills(state.session, state.session)
             staged.update(
@@ -2738,17 +2826,7 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                 governed_bar_recoveries=summaries,
                 governed_failure_map={},
             )
-    finalized = state.finalize()
-    # Shadow evidence can run only after the whole session is durably staged.
-    # Its result is never inserted into the financial worker-result contract.
-    from .runtime_recovery import local_recovery
-    if not local_recovery() and all(isinstance(result, dict) and not result.get("error") for result in finalized.values()):
-        try:
-            from tradingagents.strategies.orchestration.decision_shadow import run_decision_shadow
-            run_decision_shadow(state)
-        except Exception:
-            logger.warning("Clef decision shadow unavailable")
-    return finalized
+    return state.finalize()
 
 
 @dataclass(frozen=True)

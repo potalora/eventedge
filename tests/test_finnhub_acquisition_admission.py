@@ -48,61 +48,53 @@ def engine(source, **settings):
     return result
 
 
-def test_earnings_budget_is_order_independent_and_retains_every_exclusion():
+def test_earnings_budget_is_order_independent():
     first_source, reverse_source = Provider(), Provider(reverse=True)
     first = engine(first_source)._fetch_finnhub_data('2026-10-09')
     reverse = engine(reverse_source)._fetch_finnhub_data('2026-10-09')
     assert first_source.earnings_calls == reverse_source.earnings_calls
     assert len(first_source.earnings_calls) == 10
-    manifest = first['coverage']['acquisition_admission']['earnings_news']
-    assert manifest == reverse['coverage']['acquisition_admission']['earnings_news']
-    assert manifest['discovered_count'] == 13 and manifest['admitted_count'] == 10
-    assert manifest['excluded_count'] == 3
-    assert {row['reason'] for row in manifest['excluded']} == {'acquisition_budget'}
-    assert {row['identity']['symbol'] for row in manifest['excluded']} == {'T10', 'T11', 'T12'}
-    assert len({row['discovery_id'] for row in manifest['discovered']}) == 13
+    assert first['coverage']['contract'] == 'finnhub-acquisition-v2'
+    assert first['coverage']['earnings_discovered'] == 13
+    assert first['coverage']['earnings_news_queried'] == 10
+    assert first['coverage']['earnings_emitted'] == 13
+    assert first['coverage'] == reverse['coverage']
     assert first['transcripts'] == reverse['transcripts']
 
 
-def test_pqc_queries_use_declared_order_independent_universe():
+def test_supply_chain_universe_is_queried_once_without_pqc():
     first_source, reverse_source = Provider(), Provider(reverse=True)
-    first = engine(first_source, pqc_universe=DEFAULT_PQC)._fetch_finnhub_data('2026-10-09')
-    reverse = engine(reverse_source, pqc_universe=list(reversed(DEFAULT_PQC)))._fetch_finnhub_data('2026-10-09')
-    # The first seven calls serve the separately declared supply-chain universe.
-    assert first_source.company_calls[7:] == reverse_source.company_calls[7:] == sorted(DEFAULT_PQC)[:6]
-    manifest = first['coverage']['acquisition_admission']['pqc_news']
-    assert manifest == reverse['coverage']['acquisition_admission']['pqc_news']
-    assert manifest['discovered_count'] == 10 and manifest['excluded_count'] == 4
-    assert first['pqc_news'] == reverse['pqc_news']
+    from tradingagents.strategies.modules.supply_chain import get_supply_chain_universe
+    expected_sc = list(get_supply_chain_universe({}))
+    first = engine(first_source)._fetch_finnhub_data('2026-10-09')
+    assert first_source.company_calls == expected_sc
+    assert 'pqc_news' not in first
+    assert first['coverage']['supply_chain_query_universe'] == expected_sc
 
 
-def test_article_evidence_bound_is_declared_before_transcript_materialization():
+def test_article_evidence_bound_caps_transcript_articles():
     result = engine(Provider(earnings_count=1))._fetch_finnhub_data('2026-10-09')
-    manifests = result['coverage']['acquisition_admission']['earnings_articles']
-    assert len(manifests) == 1
-    manifest = manifests[0]
-    assert manifest['discovered_count'] == 7 and manifest['admitted_count'] == 5
-    assert manifest['excluded_count'] == 2
+    assert result['coverage']['earnings_emitted'] == 1
     text = result['transcripts'][0]['transcript_text']
     assert 'Quantum guidance 0' not in text and 'Quantum guidance 1' not in text
     for i in range(2, 7):
         assert f'Quantum guidance {i}' in text
-    assert result['transcripts'][0]['acquisition_discovery_id']
 
 
-def test_zero_acquisition_budgets_retain_discoveries_without_requests():
+def test_zero_acquisition_budgets_retain_numeric_eps_without_news_requests():
+    from tradingagents.strategies.modules.supply_chain import get_supply_chain_universe
     source = Provider()
-    result = engine(source, earnings_news_budget=0, pqc_symbol_budget=0)._fetch_finnhub_data('2026-10-09')
+    result = engine(source, earnings_news_budget=0)._fetch_finnhub_data('2026-10-09')
     assert source.earnings_calls == []
-    assert len(source.company_calls) == 7
-    coverage = result['coverage']['acquisition_admission']
-    assert coverage['earnings_news']['excluded_count'] == 13
-    assert coverage['pqc_news']['excluded_count'] == 10
-    assert result.get('transcripts', []) == [] and result.get('pqc_news', []) == []
+    assert len(source.company_calls) == len(get_supply_chain_universe({}))
+    assert result['coverage']['earnings_discovered'] == 13
+    assert result['coverage']['earnings_news_queried'] == 0
+    assert result['coverage']['earnings_emitted'] == 13
+    assert all(t['text_source'] == 'numeric_eps_surprise' for t in result['transcripts'])
     assert 'error' not in result
 
 
-@pytest.mark.parametrize('key,value', [('earnings_news_budget', True), ('pqc_symbol_budget', -1),
+@pytest.mark.parametrize('key,value', [('earnings_news_budget', True), ('earnings_news_budget', -1),
                                       ('earnings_article_budget', 1.5)])
 def test_invalid_budget_configuration_fails_before_provider_io(key, value):
     source = Provider()
@@ -111,7 +103,7 @@ def test_invalid_budget_configuration_fails_before_provider_io(key, value):
     assert source.earnings_calls == [] and source.company_calls == []
 
 
-def test_acquisition_manifest_reaches_native_strategy_health():
+def test_acquisition_coverage_reaches_native_strategy_health():
     from tradingagents.strategies.modules.earnings_call import EarningsCallStrategy
     instance = engine(Provider())
     payload = instance._fetch_finnhub_data('2026-10-09')
@@ -122,6 +114,6 @@ def test_acquisition_manifest_reaches_native_strategy_health():
         'direction': 'long', 'conviction': .8, 'rationale': 'retained guidance evidence'})
     _signals, _regime, health = instance.screen_and_enrich('2026-10-09', {'finnhub': payload},
         epoch_id='epoch', policy_id='policy')
-    coverage = health[0].evidence['source_coverage']['finnhub']['acquisition_admission']
-    assert coverage['earnings_news']['discovered_count'] == 13
-    assert coverage['earnings_news']['excluded_count'] == 3
+    coverage = health[0].evidence['source_coverage']['finnhub']
+    assert coverage['earnings_discovered'] == 13
+    assert coverage['earnings_news_queried'] == 10

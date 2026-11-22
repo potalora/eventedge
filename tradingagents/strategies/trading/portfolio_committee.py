@@ -28,12 +28,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TradeRecommendation:
-    """A sized trade recommendation from the portfolio committee."""
+    """A ranked (and optionally policy-sized) trade recommendation."""
     ticker: str
     direction: str                          # "long" or "short"
-    position_size_pct: float                # % of total capital
-    confidence: float                       # 0.0-1.0
-    rationale: str
+    position_size_pct: float = 0.0          # % of total capital (0.0 when horizon-only, before PortfolioPolicy sizing)
+    confidence: float = 0.0                 # 0.0-1.0
+    rationale: str = ""
     contributing_strategies: list[str] = field(default_factory=list)
     regime_alignment: str = "neutral"       # "aligned"/"neutral"/"misaligned"
     vehicle: str = "equity"                 # "equity" or "option"
@@ -52,30 +52,49 @@ class PortfolioCommittee:
     # OR a single strategy shorts it with LLM conviction >= this threshold.
     # (Downstream short risk gates — borrow cost, earnings blackout, margin — and
     # cohort short-eligibility still apply.)
-    SHORT_CONVICTION_THRESHOLD = 0.6
+    SHORT_CONVICTION_THRESHOLD = 0.60
+    # A single-strategy long clears the materiality gate when its conviction
+    # (or quantitative raw_signal_score when numeric-only) >= this threshold.
+    LONG_CONVICTION_THRESHOLD = 0.65
 
     @staticmethod
     def _signal_conviction(s: dict) -> float:
-        """LLM conviction (0-1) for a signal — used only for the short gate.
+        """LLM conviction (0-1) for a signal — never falls back to raw rule score.
 
-        Reads the genuine LLM conviction from metadata.llm_analysis.conviction
-        (with a top-level `llm_conviction` fallback). It deliberately does NOT
-        fall back to `score`: rule-based scores (a congressional cluster's 12, or
-        an earnings_call's 1.0) are not LLM conviction, and treating them as such
-        would let conviction-0 shorts clear the high-conviction gate. A signal
-        with no LLM analysis has conviction 0 and cannot pass on conviction alone.
+        Reads the genuine LLM conviction from top-level ``llm_conviction`` or
+        ``metadata.llm_analysis.conviction``. Rule-based quantitative scores are
+        kept separate in ``_signal_raw_score`` so unanalyzed shorts cannot pass
+        the LLM conviction gate.
         """
+        if s.get("llm_conviction") is not None and not isinstance(s.get("llm_conviction"), bool):
+            try:
+                val = float(s["llm_conviction"])
+                if math.isfinite(val):
+                    return max(0.0, min(1.0, val))
+            except (TypeError, ValueError):
+                pass
         la = (s.get("metadata") or {}).get("llm_analysis")
-        if isinstance(la, dict) and la.get("conviction") is not None:
+        if isinstance(la, dict) and la.get("conviction") is not None and not isinstance(la.get("conviction"), bool):
             try:
-                return float(la["conviction"])
+                val = float(la["conviction"])
+                if math.isfinite(val):
+                    return max(0.0, min(1.0, val))
             except (TypeError, ValueError):
                 return 0.0
-        if s.get("llm_conviction") is not None:
-            try:
-                return float(s["llm_conviction"])
-            except (TypeError, ValueError):
-                return 0.0
+        return 0.0
+
+    @staticmethod
+    def _signal_raw_score(s: dict) -> float:
+        """Quantitative signal strength, separate from LLM conviction."""
+        for key in ("raw_signal_score", "score"):
+            val = s.get(key)
+            if val is not None and not isinstance(val, bool):
+                try:
+                    num = float(val)
+                    if math.isfinite(num):
+                        return num
+                except (TypeError, ValueError):
+                    continue
         return 0.0
 
     @classmethod
@@ -96,12 +115,11 @@ class PortfolioCommittee:
         pt_config = self.config.get("autoresearch", {}).get("paper_trade", {})
         self._model_name = pt_config.get(
             "portfolio_committee_model",
-            self.config.get("autoresearch", {}).get("autoresearch_model", "claude-haiku-4-5-20251001"),
+            self.config.get("autoresearch", {}).get("autoresearch_model", "gpt-6.2-sol"),
         )
-        self._effort = pt_config.get("portfolio_committee_effort", self.config.get("autoresearch", {}).get("llm_effort", "medium"))
+        self._effort = pt_config.get("portfolio_committee_effort", self.config.get("autoresearch", {}).get("llm_effort", "high"))
         self._enabled = pt_config.get("portfolio_committee_enabled", True)
-        # Older models use temperature zero by default. Sonnet 5 omits sampling
-        # controls because adaptive thinking rejects non-default values.
+        # Older models use temperature zero by default.
         self._temperature = self.config.get("autoresearch", {}).get("llm_temperature", 0.0)
 
         # Use size profile if provided, otherwise fall back to config defaults
@@ -125,10 +143,12 @@ class PortfolioCommittee:
             if self._policy_enabled
             else None
         )
+        rd_cfg = self.config.get("autoresearch", {}).get("risk_discipline", {})
         self._short_conviction_threshold = float(
-            self.config.get("autoresearch", {})
-            .get("risk_discipline", {})
-            .get("short_conviction_threshold", self.SHORT_CONVICTION_THRESHOLD)
+            rd_cfg.get("short_conviction_threshold", self.SHORT_CONVICTION_THRESHOLD)
+        )
+        self._long_conviction_threshold = float(
+            rd_cfg.get("long_conviction_threshold", self.LONG_CONVICTION_THRESHOLD)
         )
         self._client = None
         self.last_policy_decisions = ()
@@ -136,6 +156,149 @@ class PortfolioCommittee:
         self._model_failure_reason = ""
         self.last_call_provenance: dict[str, Any] = {}
         self.last_research_request: dict[str, Any] | None = None
+
+    def synthesize_horizon(
+        self,
+        horizon: str,
+        signals: list[dict],
+        regime: dict | None = None,
+        enrichment: dict | None = None,
+        *,
+        strategy_confidence: dict[str, float] | None = None,
+        current_positions: list[dict] | None = None,
+        model_coverage: dict[str, Any] | None = None,
+    ) -> list[TradeRecommendation]:
+        """Run one size-agnostic committee synthesis call for an investment horizon.
+
+        Returns ranked directional recommendations with ``position_size_pct=0.0``
+        (no LLM-invented sizing). Downstream cohort runners apply deterministic
+        inverse-volatility ``PortfolioPolicy.apply(horizon_recs, risk_context)``
+        across all 4 size tiers ($5k/$10k/$50k/$100k) with zero cross-size LLM
+        sampling variance.
+        """
+        self.last_policy_decisions = ()
+        self.last_research_request = None
+        self._model_failure_reason = ""
+        self.last_call_provenance = {
+            "configured_model": self._model_name,
+            "returned_model": None,
+            "returned_revision": None,
+            "identity_status": "unpinned",
+            "response_id": None,
+            "reasoning_effort": self._effort,
+        } if self._enabled else {}
+        self.last_decision_status = {
+            "mode": "model" if self._enabled else "rule_only",
+            "model": self._model_name if self._enabled else None,
+            "horizon": horizon,
+            "status": "no_candidates",
+            "degraded": False,
+            "reason": "",
+            "input_count": len(signals),
+            "eligible_count": 0,
+            "selected_count": 0,
+        }
+        if self.last_call_provenance:
+            self.last_decision_status["model_provenance"] = dict(self.last_call_provenance)
+        if model_coverage is not None:
+            self.last_decision_status["model_coverage"] = dict(model_coverage)
+        if (model_coverage is not None and model_coverage.get("complete") is False) or any(
+            (s.get("metadata") or {}).get("analysis_failure_reason") == "model_deadline_exhausted"
+            for s in signals
+        ):
+            self.last_decision_status.update(
+                status="failed", degraded=True, reason="model_deadline_exhausted"
+            )
+            return []
+        from tradingagents.strategies.orchestration.research_resilience import (
+            configured as resilience_configured,
+        )
+        holds = (regime or {}).get("research_hold_reasons", [])
+        if resilience_configured(self.config.get("autoresearch", {})) and holds:
+            if not isinstance(holds, list) or any(
+                type(reason) is not str or not reason for reason in holds
+            ):
+                raise ValueError("invalid_research_hold")
+            self.last_decision_status.update(
+                status="research_hold",
+                degraded=True,
+                reason=holds[0],
+                research_hold_reasons=list(holds),
+            )
+            return []
+        eligible_signals = [
+            s
+            for s in signals
+            if not s.get("journal_only")
+            and not (s.get("metadata") or {}).get("non_actionable_reason")
+        ]
+        self.last_decision_status["eligible_count"] = len(eligible_signals)
+        if not eligible_signals:
+            return []
+
+        regime_context = regime or {}
+        strat_conf = strategy_confidence or {}
+        held = current_positions or []
+        enrich = enrichment or {}
+
+        ranked: list[TradeRecommendation] | None = None
+        if self._enabled:
+            try:
+                ranked = self._llm_synthesize(
+                    eligible_signals,
+                    regime_context,
+                    strat_conf,
+                    held,
+                    total_capital=0.0,
+                    enrichment=enrich,
+                    horizon=horizon,
+                    size_agnostic=True,
+                )
+            except Exception as exc:
+                self._model_failure_reason = (
+                    "model_deadline_exhausted"
+                    if type(exc).__name__ == "ModelDeadlineExceeded"
+                    else type(exc).__name__
+                )
+                logger.warning("LLM horizon synthesis failed; holding cash", exc_info=True)
+            if self.last_call_provenance:
+                self.last_decision_status["model_provenance"] = dict(self.last_call_provenance)
+            if self.last_research_request is not None:
+                self.last_decision_status["model_request"] = dict(self.last_research_request)
+            if ranked is None:
+                self.last_decision_status.update(
+                    status="failed",
+                    degraded=True,
+                    reason=self._model_failure_reason or "model_unavailable",
+                )
+                return []
+        else:
+            ranked = self._rule_based_synthesize(
+                eligible_signals,
+                regime_context,
+                strat_conf,
+                held,
+                total_capital=0.0,
+                enrichment=enrich,
+                size_agnostic=True,
+            )
+
+        if not ranked:
+            self.last_decision_status["status"] = "abstained"
+            return []
+
+        if self._enabled and not self._recommendations_are_grounded(ranked, eligible_signals):
+            self.last_decision_status.update(
+                status="failed", degraded=True, reason="invalid_model_attribution"
+            )
+            return []
+
+        attributed = self._finalize_recommendations(ranked, eligible_signals, zero_size=True)
+        self.last_decision_status.update(
+            status="selected" if attributed else "abstained",
+            selected_count=len(attributed),
+        )
+        return attributed
 
     def synthesize(
         self,
@@ -241,10 +404,45 @@ class PortfolioCommittee:
                                              reason="invalid_model_attribution")
             return []
 
+        attributed = self._finalize_recommendations(ranked, signals, zero_size=False)
+        if not self._policy_enabled:
+            self.last_policy_decisions = ()
+            self.last_decision_status.update(status="selected" if attributed else "abstained", selected_count=len(attributed))
+            return attributed
+        policy = PortfolioPolicy()
+        accepted = policy.apply(attributed, risk_context)
+        if hasattr(policy, "last_decisions"):
+            self.last_policy_decisions = policy.last_decisions
+        else:
+            raise RuntimeError("portfolio policy did not publish its decision sidecar")
+        self.last_decision_status.update(status="selected" if accepted else "abstained", selected_count=len(accepted))
+        return accepted
+
+    def _finalize_recommendations(
+        self,
+        ranked: list[TradeRecommendation],
+        signals: list[dict],
+        *,
+        zero_size: bool = False,
+    ) -> list[TradeRecommendation]:
+        """Apply deterministic signal attribution, short conviction gate, sorting, and dedupe."""
         attributed = self._derive_attribution(ranked, signals)
-        attributed = [rec for rec in attributed if rec.direction != "short" or self._short_passes_gate(
-            [signal for signal in signals if signal.get("ticker") == rec.ticker and signal.get("direction") == "short"],
-            self._short_conviction_threshold)]
+        if zero_size:
+            attributed = [replace(rec, position_size_pct=0.0) for rec in attributed]
+        attributed = [
+            rec
+            for rec in attributed
+            if rec.direction != "short"
+            or self._short_passes_gate(
+                [
+                    signal
+                    for signal in signals
+                    if signal.get("ticker") == rec.ticker
+                    and signal.get("direction") == "short"
+                ],
+                self._short_conviction_threshold,
+            )
+        ]
 
         def recommendation_key(
             recommendation: TradeRecommendation,
@@ -278,10 +476,7 @@ class PortfolioCommittee:
                 recommendation.journal_only,
             )
 
-        attributed = sorted(
-            attributed,
-            key=recommendation_key,
-        )
+        attributed = sorted(attributed, key=recommendation_key)
         deduped: list[TradeRecommendation] = []
         seen_pairs: set[tuple[str, str]] = set()
         for recommendation in attributed:
@@ -294,19 +489,7 @@ class PortfolioCommittee:
                 continue
             seen_pairs.add(pair)
             deduped.append(recommendation)
-        attributed = deduped
-        if not self._policy_enabled:
-            self.last_policy_decisions = ()
-            self.last_decision_status.update(status="selected" if attributed else "abstained", selected_count=len(attributed))
-            return attributed
-        policy = PortfolioPolicy()
-        accepted = policy.apply(attributed, risk_context)
-        if hasattr(policy, "last_decisions"):
-            self.last_policy_decisions = policy.last_decisions
-        else:
-            raise RuntimeError("portfolio policy did not publish its decision sidecar")
-        self.last_decision_status.update(status="selected" if accepted else "abstained", selected_count=len(accepted))
-        return accepted
+        return deduped
 
     @staticmethod
     def _signal_tags(signal: dict, key: str) -> tuple[str, ...]:
@@ -425,17 +608,19 @@ class PortfolioCommittee:
         current_positions: list[dict],
         total_capital: float,
         enrichment: dict | None = None,
+        *,
+        size_agnostic: bool = False,
     ) -> list[TradeRecommendation]:
         """Rule-based signal synthesis fallback.
 
         Logic:
         1. Group signals by ticker
-        2. Compute consensus score = sum(signal.score * strategy_confidence)
-        3. Determine direction consensus (majority vote weighted by score)
-        4. Filter: require 2+ strategies or single with confidence > 0.8
-        5. Size proportional to consensus, capped by max_single_position
-        6. Enforce sector concentration limits
-        7. Return sorted by confidence
+        2. Separate quantitative raw_signal_score from LLM conviction [0, 1]
+        3. Determine direction consensus (majority vote weighted by strength)
+        4. Filter: require 2+ strategies, or single-strategy short with
+           llm_conviction >= short_conviction_threshold, or single-strategy long
+           with conviction / quantitative signal >= long_conviction_threshold
+        5. When size_agnostic=True, leave position_size_pct=0.0 for PortfolioPolicy
         """
         # Group by ticker
         ticker_signals: dict[str, list[dict]] = defaultdict(list)
@@ -444,8 +629,12 @@ class PortfolioCommittee:
             if ticker:
                 ticker_signals[ticker].append(sig)
 
-        # Filter short signals for ineligible cohorts
-        if self._size_profile and not getattr(self._size_profile, 'short_eligible', True):
+        # Filter short signals for ineligible cohorts (only in legacy sized mode)
+        if (
+            not size_agnostic
+            and self._size_profile
+            and not getattr(self._size_profile, "short_eligible", True)
+        ):
             ticker_signals = {
                 t: [s for s in sigs if s.get("direction") != "short"]
                 for t, sigs in ticker_signals.items()
@@ -455,23 +644,23 @@ class PortfolioCommittee:
         recommendations: list[TradeRecommendation] = []
 
         for ticker, sigs in ticker_signals.items():
-            # Compute weighted direction consensus
             long_score = 0.0
             short_score = 0.0
-            strategies: list[str] = []
 
             for s in sigs:
                 strat = s.get("strategy", "unknown")
-                conf = strategy_confidence.get(strat, 0.5)
-                score = s.get("score", 0.0) * conf
+                # Default strategy confidence to 1.0 (neutral) instead of 0.5 so
+                # realistic [0, 1] convictions are not halved below threshold.
+                strat_weight = float(strategy_confidence.get(strat, 1.0))
+                llm_conv = self._signal_conviction(s)
+                raw_score = self._signal_raw_score(s)
+                strength = llm_conv if llm_conv > 0.0 else raw_score
+                weighted = strength * strat_weight
 
                 if s.get("direction") == "long":
-                    long_score += score
+                    long_score += weighted
                 elif s.get("direction") == "short":
-                    short_score += score
-
-                if strat not in strategies:
-                    strategies.append(strat)
+                    short_score += weighted
 
             # Direction = majority weighted vote
             if long_score > short_score:
@@ -483,89 +672,109 @@ class PortfolioCommittee:
             else:
                 continue  # Skip ties
 
-            # Filter: require 2+ strategies, or single strategy with a material event.
-            # Multi-strategy convergence is inherently strong. Single-strategy
-            # shorts need high LLM conviction (>= threshold); single-strategy longs
-            # need a meaningful weighted score.
-            strategies = sorted({s.get("strategy", "unknown") for s in sigs if s.get("direction") == direction})
+            aligned_sigs = [s for s in sigs if s.get("direction") == direction]
+            strategies = sorted({s.get("strategy", "unknown") for s in aligned_sigs})
             num_strategies = len(strategies)
             if num_strategies < 2:
                 if direction == "short":
                     max_conv = max(
-                        (self._signal_conviction(s) for s in sigs
-                         if s.get("direction") == "short"),
+                        (self._signal_conviction(s) for s in aligned_sigs),
                         default=0.0,
                     )
                     if max_conv < self._short_conviction_threshold:
-                        continue  # Single-strategy short, low conviction — skip
-                elif consensus_score < 0.5:
-                    continue  # Single-strategy long, weak event — hold cash instead
+                        continue  # Single-strategy short, low LLM conviction — skip
+                else:
+                    max_long_strength = max(
+                        (
+                            self._signal_conviction(s)
+                            if self._signal_conviction(s) > 0.0
+                            else self._signal_raw_score(s)
+                            for s in aligned_sigs
+                        ),
+                        default=0.0,
+                    )
+                    if max_long_strength < self._long_conviction_threshold or consensus_score <= 0.0:
+                        continue  # Single-strategy long below conviction threshold — hold cash
 
             # Regime alignment
             regime_alignment = self._assess_regime_alignment(
                 direction, regime_context, ticker=ticker,
             )
 
-            # Confidence: based on strategy count, consensus, and regime
-            confidence = min(1.0, consensus_score * (1.0 if regime_alignment == "aligned"
-                                                      else 0.7 if regime_alignment == "neutral"
-                                                      else 0.6))
+            # Confidence: based on strategy consensus and regime
+            confidence = min(
+                1.0,
+                consensus_score
+                * (
+                    1.0
+                    if regime_alignment == "aligned"
+                    else 0.85
+                    if regime_alignment == "neutral"
+                    else 0.65
+                ),
+            )
 
-            # Size: proportional to confidence, capped
-            position_size = min(confidence * self._max_position, self._max_position)
+            position_size = (
+                0.0
+                if size_agnostic
+                else min(confidence * self._max_position, self._max_position)
+            )
 
             rationale_parts = [f"{len(strategies)} strategies agree"]
             if regime_alignment != "neutral":
                 rationale_parts.append(f"regime {regime_alignment}")
 
-            recommendations.append(TradeRecommendation(
-                ticker=ticker,
-                direction=direction,
-                position_size_pct=position_size,
-                confidence=confidence,
-                rationale="; ".join(rationale_parts),
-                contributing_strategies=strategies,
-                regime_alignment=regime_alignment,
-            ))
-
-        # Enforce sector concentration (use enrichment profiles if available)
-        enrichment = enrichment or {}
-        profiles = enrichment.get("profiles", {})
-        if profiles:
-            sector_alloc: dict[str, float] = defaultdict(float)
-            for rec in recommendations:
-                sector = profiles.get(rec.ticker, {}).get("sector", "Unknown")
-                sector_alloc[sector] += rec.position_size_pct
-
-            for rec in recommendations:
-                sector = profiles.get(rec.ticker, {}).get("sector", "Unknown")
-                if sector_alloc[sector] > self._max_sector:
-                    scale = self._max_sector / sector_alloc[sector]
-                    rec.position_size_pct *= scale
-
-        recommendations = self._enforce_sector_limits(recommendations)
-
-        # Enforce commodity allocation cap
-        if self._size_profile and getattr(self._size_profile, 'commodity_eligible', False):
-            from tradingagents.strategies.modules.commodity_macro import COMMODITY_ETFS
-            max_commodity = getattr(self._size_profile, 'max_commodity_allocation_pct', 0.10)
-            commodity_alloc = sum(
-                r.position_size_pct for r in recommendations if r.ticker in COMMODITY_ETFS
+            recommendations.append(
+                TradeRecommendation(
+                    ticker=ticker,
+                    direction=direction,
+                    position_size_pct=position_size,
+                    confidence=confidence,
+                    rationale="; ".join(rationale_parts),
+                    contributing_strategies=strategies,
+                    regime_alignment=regime_alignment,
+                )
             )
-            if commodity_alloc > max_commodity and commodity_alloc > 0:
-                scale = max_commodity / commodity_alloc
-                for r in recommendations:
-                    if r.ticker in COMMODITY_ETFS:
-                        r.position_size_pct *= scale
 
-        # Cap short exposure
-        if self._size_profile and getattr(self._size_profile, 'max_short_exposure_pct', 0) > 0:
-            short_recs = [r for r in recommendations if r.direction == "short"]
-            total_short = sum(r.position_size_pct for r in short_recs)
-            if total_short > self._size_profile.max_short_exposure_pct:
-                scale = self._size_profile.max_short_exposure_pct / total_short
-                for r in short_recs:
-                    r.position_size_pct *= scale
+        if not size_agnostic:
+            # Enforce sector concentration (use enrichment profiles if available)
+            enrichment = enrichment or {}
+            profiles = enrichment.get("profiles", {})
+            if profiles:
+                sector_alloc: dict[str, float] = defaultdict(float)
+                for rec in recommendations:
+                    sector = profiles.get(rec.ticker, {}).get("sector", "Unknown")
+                    sector_alloc[sector] += rec.position_size_pct
+
+                for rec in recommendations:
+                    sector = profiles.get(rec.ticker, {}).get("sector", "Unknown")
+                    if sector_alloc[sector] > self._max_sector:
+                        scale = self._max_sector / sector_alloc[sector]
+                        rec.position_size_pct *= scale
+
+            recommendations = self._enforce_sector_limits(recommendations)
+
+            # Enforce commodity allocation cap
+            if self._size_profile and getattr(self._size_profile, "commodity_eligible", False):
+                from tradingagents.strategies.modules.commodity_macro import COMMODITY_ETFS
+                max_commodity = getattr(self._size_profile, "max_commodity_allocation_pct", 0.10)
+                commodity_alloc = sum(
+                    r.position_size_pct for r in recommendations if r.ticker in COMMODITY_ETFS
+                )
+                if commodity_alloc > max_commodity and commodity_alloc > 0:
+                    scale = max_commodity / commodity_alloc
+                    for r in recommendations:
+                        if r.ticker in COMMODITY_ETFS:
+                            r.position_size_pct *= scale
+
+            # Cap short exposure
+            if self._size_profile and getattr(self._size_profile, "max_short_exposure_pct", 0) > 0:
+                short_recs = [r for r in recommendations if r.direction == "short"]
+                total_short = sum(r.position_size_pct for r in short_recs)
+                if total_short > self._size_profile.max_short_exposure_pct:
+                    scale = self._size_profile.max_short_exposure_pct / total_short
+                    for r in short_recs:
+                        r.position_size_pct *= scale
 
         # Sort by confidence descending
         recommendations.sort(key=lambda r: r.confidence, reverse=True)
@@ -616,15 +825,22 @@ class PortfolioCommittee:
         current_positions: list[dict],
         total_capital: float,
         enrichment: dict | None = None,
+        *,
+        horizon: str | None = None,
+        size_agnostic: bool = False,
     ) -> list[TradeRecommendation] | None:
         """Single LLM call for signal synthesis. Returns None on failure."""
         if self._get_client() is None:
             self._model_failure_reason = "model_unavailable"
             return None
 
-        # Pre-filter signals that are ineligible for this profile
+        # Pre-filter signals that are ineligible for this profile (sized mode only)
         filtered_signals = signals
-        if self._size_profile and not getattr(self._size_profile, 'short_eligible', True):
+        if (
+            not size_agnostic
+            and self._size_profile
+            and not getattr(self._size_profile, "short_eligible", True)
+        ):
             filtered_signals = [s for s in signals if s.get("direction") != "short"]
 
         # Short conviction gate: keep shorts with 2+ strategy convergence OR a
@@ -634,11 +850,14 @@ class PortfolioCommittee:
             if s.get("direction") == "short":
                 shorts_by_ticker.setdefault(s.get("ticker", ""), []).append(s)
         blocked_short_tickers = {
-            t for t, ss in shorts_by_ticker.items() if not self._short_passes_gate(ss, self._short_conviction_threshold)
+            t
+            for t, ss in shorts_by_ticker.items()
+            if not self._short_passes_gate(ss, self._short_conviction_threshold)
         }
         if blocked_short_tickers:
             filtered_signals = [
-                s for s in filtered_signals
+                s
+                for s in filtered_signals
                 if not (
                     s.get("direction") == "short"
                     and s.get("ticker") in blocked_short_tickers
@@ -646,41 +865,67 @@ class PortfolioCommittee:
             ]
 
         prompt = self._build_prompt(
-            filtered_signals, regime_context, strategy_confidence,
-            current_positions, total_capital, enrichment,
+            filtered_signals,
+            regime_context,
+            strategy_confidence,
+            current_positions,
+            total_capital,
+            enrichment,
+            horizon=horizon,
+            size_agnostic=size_agnostic,
         )
 
         try:
             system_parts = [
                 "You are a portfolio manager synthesizing trading signals from multiple strategies.",
             ]
-            if self._size_profile:
+            if size_agnostic:
+                system_parts.append(
+                    f"Investment horizon: {horizon or '30d'}. "
+                    "Position sizing is handled deterministically downstream by PortfolioPolicy; "
+                    "focus exclusively on directional selection, conviction [0.0, 1.0], and economic thesis."
+                )
+            elif self._size_profile:
                 system_parts.append(
                     f"Portfolio: ${self._size_profile.total_capital:,.0f} capital, "
                     f"max {self._size_profile.max_positions} positions, "
                     f"max {self._size_profile.max_position_pct:.0%} per position."
                 )
-                if not getattr(self._size_profile, 'short_eligible', True):
+                if not getattr(self._size_profile, "short_eligible", True):
                     system_parts.append("This portfolio is LONG ONLY — ignore all short signals.")
             else:
-                system_parts.append("Investment horizon: 30 days.")
+                system_parts.append(f"Investment horizon: {horizon or '30d'}.")
+
+            if size_agnostic:
+                output_spec = (
+                    "Return ONLY a JSON array of objects with keys: ticker, direction, confidence, "
+                    "rationale, contributing_strategies, regime_alignment. "
+                    'The direction field must be exactly lowercase "long" or "short". '
+                    "Keep confidence in [0.0, 1.0]. Keep rationale under 80 chars."
+                )
+            else:
+                output_spec = (
+                    "Return ONLY a JSON array of objects with keys: ticker, direction, position_size_pct, confidence, "
+                    "rationale, contributing_strategies, regime_alignment. "
+                    'The direction field must be exactly lowercase "long" or "short". '
+                    f"Keep position_size_pct between 0.01 and {self._max_position:.2f}. Keep rationale under 80 chars."
+                )
+
             system_parts.append(
-                "Given signals, regime context, and strategy confidence scores, output a ranked list of trades. "
+                "Given clean economic signals, regime context, and strategy confidence scores, output a ranked list of trades. "
                 "Only recommend trades with genuine event-driven conviction — "
                 "it is better to hold cash than to fill position slots with marginal signals. "
                 "Multi-strategy convergence (2+ strategies on same ticker) is much stronger than single-strategy signals. "
-                "HARD RULE: only recommend a SHORT trade if 2+ strategies agree on the same ticker, "
-                "OR a single strategy shorts it with high conviction (>= 0.6). "
-                "For single-strategy LONG signals, only recommend if the event is clearly material (score >= 2.0 or strong catalyst). "
-                "Return ONLY a JSON array of objects with keys: ticker, direction, position_size_pct, confidence, "
-                "rationale, contributing_strategies, regime_alignment. "
-                'The direction field must be exactly lowercase "long" or "short". '
-                f"Keep position_size_pct between 0.01 and {self._max_position:.2f}. Keep rationale under 80 chars."
+                f"HARD RULE: only recommend a SHORT trade if 2+ strategies agree on the same ticker, "
+                f"OR a single strategy shorts it with high LLM conviction (>= {self._short_conviction_threshold:.2f}). "
+                f"For single-strategy LONG signals, only recommend if the event is clearly material "
+                f"(llm_conviction >= {self._long_conviction_threshold:.2f}, or strong quantitative raw_signal_score >= {self._long_conviction_threshold:.2f} with clear catalyst). "
+                + output_spec
             )
             system_prompt = "\n".join(system_parts)
 
             text = self._call_llm(system=system_prompt, prompt=prompt, max_tokens=4096)
-            recs = self._parse_llm_response(text)
+            recs = self._parse_llm_response(text, require_position_size=not size_agnostic)
             if recs is None:
                 self._model_failure_reason = "invalid_model_response"
             elif not self._recommendations_are_grounded(recs, filtered_signals):
@@ -692,7 +937,8 @@ class PortfolioCommittee:
             # a short rec needs 2+ contributing strategies OR high LLM confidence.
             if recs:
                 recs = [
-                    r for r in recs
+                    r
+                    for r in recs
                     if not (
                         r.direction == "short"
                         and len(r.contributing_strategies) < 2
@@ -701,9 +947,117 @@ class PortfolioCommittee:
                 ]
             return recs
         except Exception as exc:
-            self._model_failure_reason = "model_deadline_exhausted" if type(exc).__name__ == "ModelDeadlineExceeded" else type(exc).__name__
+            self._model_failure_reason = (
+                "model_deadline_exhausted"
+                if type(exc).__name__ == "ModelDeadlineExceeded"
+                else type(exc).__name__
+            )
             logger.warning("LLM synthesis call failed; holding cash", exc_info=True)
             return None
+
+    @classmethod
+    def _clean_signal_for_prompt(
+        cls,
+        signal: dict,
+        *,
+        horizon: str | None = None,
+        realized_volatility: float | None = None,
+    ) -> dict[str, Any]:
+        """Extract strictly clean economic fields; strip internal provenance blobs."""
+        meta = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
+        llm_analysis = meta.get("llm_analysis") if isinstance(meta.get("llm_analysis"), dict) else {}
+
+        ticker = str(signal.get("ticker", "?"))
+        direction = str(signal.get("direction", "?"))
+        strategy = str(signal.get("strategy", "unknown"))
+        raw_score = round(cls._signal_raw_score(signal), 4)
+        conv = cls._signal_conviction(signal)
+        has_llm_conv = (
+            signal.get("llm_conviction") is not None
+            or llm_analysis.get("conviction") is not None
+        )
+
+        # Bull/bear disagreement counts (if aggregated by _resolve_signals or present on signal)
+        bull_count = signal.get("long_count", signal.get("bull_signal_count"))
+        bear_count = signal.get("short_count", signal.get("bear_signal_count"))
+        if bull_count is None and bear_count is None:
+            bull_count = 1 if direction == "long" else 0
+            bear_count = 1 if direction == "short" else 0
+
+        # Concise thesis / catalyst summary
+        thesis_parts: list[str] = []
+        for candidate_text in (
+            llm_analysis.get("thesis"),
+            llm_analysis.get("rationale"),
+            llm_analysis.get("summary"),
+            meta.get("thesis"),
+            meta.get("headline"),
+        ):
+            if isinstance(candidate_text, str) and candidate_text.strip():
+                thesis_parts.append(candidate_text.strip()[:240])
+                break
+        catalyst: dict[str, Any] = {}
+        for econ_key in (
+            "eps_surprise_pct",
+            "contract_amount",
+            "cot_percentile",
+            "drought_score",
+            "trailing_return",
+            "evidence_mode",
+            "gate_reasons",
+            "affected_peers",
+        ):
+            if econ_key in meta and meta[econ_key] is not None:
+                val = meta[econ_key]
+                if econ_key == "affected_peers" and isinstance(val, list):
+                    val = val[:5]
+                catalyst[econ_key] = val
+
+        clean: dict[str, Any] = {
+            "ticker": ticker,
+            "strategy": strategy,
+            "direction": direction,
+            "raw_signal_score": raw_score,
+            "llm_conviction": round(conv, 4) if has_llm_conv else None,
+            "bull_signal_count": int(bull_count or 0),
+            "bear_signal_count": int(bear_count or 0),
+        }
+        if thesis_parts:
+            clean["thesis"] = thesis_parts[0]
+        if catalyst:
+            clean["catalyst"] = catalyst
+        if horizon:
+            clean["horizon"] = horizon
+        if realized_volatility is not None and math.isfinite(realized_volatility):
+            clean["realized_volatility"] = round(float(realized_volatility), 4)
+        return clean
+
+    @staticmethod
+    def _clean_regime_for_prompt(regime_context: dict) -> dict[str, Any]:
+        allowed = (
+            "overall_regime",
+            "vix_level",
+            "vix_regime",
+            "credit_spread_bps",
+            "credit_regime",
+            "yield_curve_slope",
+            "yield_regime",
+        )
+        return {k: regime_context[k] for k in allowed if k in regime_context}
+
+    @staticmethod
+    def _clean_position_for_prompt(position: dict) -> dict[str, Any]:
+        allowed = (
+            "ticker",
+            "direction",
+            "shares",
+            "weight",
+            "market_value",
+            "marked_value",
+            "entry_price",
+            "sector",
+        )
+        return {k: position[k] for k in allowed if k in position}
 
     def _build_prompt(
         self,
@@ -713,27 +1067,53 @@ class PortfolioCommittee:
         current_positions: list[dict],
         total_capital: float,
         enrichment: dict | None = None,
+        *,
+        horizon: str | None = None,
+        size_agnostic: bool = False,
     ) -> str:
-        """Build synthesis prompt for LLM."""
-        # Include the complete admitted evidence and held exposure. There is no
-        # implicit row cap: provider context rejection becomes an observable
-        # failed decision, never a different population or a rule fallback.
-        sig_lines = [f"  {s.get('ticker', '?')} {s.get('direction', '?')} " + json.dumps(s, sort_keys=True, default=str) for s in signals]
-        regime_str = json.dumps(regime_context, sort_keys=True, default=str) if regime_context else "normal"
+        """Build synthesis prompt with strictly clean economic fields (no provenance blobs)."""
+        enrichment = enrichment or {}
+        vol_map = enrichment.get("annualized_volatility") or enrichment.get("volatility") or {}
+        if not isinstance(vol_map, dict):
+            vol_map = {}
+
+        sig_lines = []
+        for s in signals:
+            ticker = str(s.get("ticker", "?"))
+            raw_vol = vol_map.get(ticker, s.get("realized_volatility"))
+            try:
+                vol_val = float(raw_vol) if raw_vol is not None and not isinstance(raw_vol, bool) else None
+            except (TypeError, ValueError):
+                vol_val = None
+            cleaned = self._clean_signal_for_prompt(
+                s, horizon=horizon, realized_volatility=vol_val
+            )
+            sig_lines.append(
+                f"  {ticker} {cleaned['direction']} "
+                + json.dumps(cleaned, sort_keys=True, default=str)
+            )
+
+        clean_regime = self._clean_regime_for_prompt(regime_context) if regime_context else {}
+        regime_str = json.dumps(clean_regime, sort_keys=True, default=str) if clean_regime else "normal"
         conf_str = json.dumps(strategy_confidence, sort_keys=True, default=str) if strategy_confidence else "{}"
-        pos_lines = ["  " + json.dumps(p, sort_keys=True, default=str) for p in current_positions]
+        pos_lines = [
+            "  " + json.dumps(self._clean_position_for_prompt(p), sort_keys=True, default=str)
+            for p in current_positions
+        ]
 
         # Add enrichment context if available
         enrichment_str = ""
-        enrichment = enrichment or {}
         profiles = enrichment.get("profiles", {})
         short_interest = enrichment.get("short_interest", {})
         factors = enrichment.get("factors", {})
 
         if profiles:
             sector_lines = [
-                (f"  {t}: asset type ETF; corporate sector not applicable; look-through sector unknown"
-                 if p.get("asset_type") == "ETF" else f"  {t}: {p.get('sector', '?')}")
+                (
+                    f"  {t}: asset type ETF; corporate sector not applicable; look-through sector unknown"
+                    if p.get("asset_type") == "ETF"
+                    else f"  {t}: {p.get('sector', '?')}"
+                )
                 for t, p in sorted(profiles.items())
             ]
             enrichment_str += "\nSector classification:\n" + "\n".join(sector_lines)
@@ -766,9 +1146,16 @@ class PortfolioCommittee:
                 commodity_lines.append(f"  {ticker}: COT speculative percentile={pctl}")
             enrichment_str += "\nCommodity context:\n" + "\n".join(commodity_lines)
 
-        return f"""Capital: ${total_capital:,.0f}
-Max position: {self._max_position:.0%}
-Max sector: {self._max_sector:.0%}
+        if size_agnostic:
+            header = f"Horizon: {horizon or '30d'}\nSizing: Deterministic downstream PortfolioPolicy"
+        else:
+            header = (
+                f"Capital: ${total_capital:,.0f}\n"
+                f"Max position: {self._max_position:.0%}\n"
+                f"Max sector: {self._max_sector:.0%}"
+            )
+
+        return f"""{header}
 
 Regime: {regime_str}
 
@@ -783,7 +1170,12 @@ Current positions (all {len(current_positions)} held exposures):
 
 Synthesize into ranked trade list. Return JSON array."""
 
-    def _parse_llm_response(self, text: str) -> list[TradeRecommendation] | None:
+    def _parse_llm_response(
+        self,
+        text: str,
+        *,
+        require_position_size: bool = True,
+    ) -> list[TradeRecommendation] | None:
         """Parse LLM JSON response into TradeRecommendation list."""
         # Strip markdown fences
         if text.startswith("```"):
@@ -807,124 +1199,32 @@ Synthesize into ranked trade list. Return JSON array."""
             return None
 
         recommendations = []
+        required_numeric_keys = ("position_size_pct", "confidence") if require_position_size else ("confidence",)
         for item in data:
             if not isinstance(item, dict):
                 return None
             if not isinstance(item.get("ticker"), str) or not item["ticker"].strip() or item.get("direction") not in {"long", "short"}:
                 return None
-            for key in ("position_size_pct", "confidence"):
+            for key in required_numeric_keys:
                 value = item.get(key)
                 if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
                     return None
             if not isinstance(item.get("rationale", ""), str) or not isinstance(item.get("contributing_strategies", []), list) or any(not isinstance(value, str) for value in item.get("contributing_strategies", [])):
                 return None
-            recommendations.append(TradeRecommendation(
-                ticker=item.get("ticker", ""),
-                direction=item.get("direction", ""),
-                position_size_pct=float(item.get("position_size_pct", 0.05)),
-                confidence=float(item.get("confidence", 0.5)),
-                rationale=item.get("rationale", ""),
-                contributing_strategies=item.get("contributing_strategies", []),
-                regime_alignment=item.get("regime_alignment", "neutral"),
-            ))
+            pos_size = float(item["position_size_pct"]) if require_position_size else 0.0
+            recommendations.append(
+                TradeRecommendation(
+                    ticker=item.get("ticker", ""),
+                    direction=item.get("direction", ""),
+                    position_size_pct=pos_size,
+                    confidence=float(item.get("confidence", 0.5)),
+                    rationale=item.get("rationale", ""),
+                    contributing_strategies=item.get("contributing_strategies", []),
+                    regime_alignment=item.get("regime_alignment", "neutral"),
+                )
+            )
 
         return recommendations
-
-    def generate_covered_call_overlays(
-        self,
-        current_positions: list[dict],
-        iv_data: dict[str, dict],
-        earnings_dates: dict[str, int],
-        trading_date: str,
-    ) -> list[TradeRecommendation]:
-        """Identify existing long positions suitable for covered call overlay."""
-        if not self._size_profile or "covered_call" not in getattr(self._size_profile, 'options_eligible', []):
-            return []
-
-        longs = [p for p in current_positions if p.get("direction") == "long"]
-        if not longs:
-            return []
-
-        candidates = self._llm_covered_call_overlay(longs, iv_data, earnings_dates, trading_date)
-        if not candidates:
-            return []
-
-        overlays = []
-        for c in candidates:
-            ticker = c.get("ticker", "")
-            if not ticker:
-                continue
-            spec = OptionSpec(
-                strategy="covered_call",
-                expiry_target_days=c.get("expiry_days", 30),
-                strike_offset_pct=c.get("strike_offset_pct", 0.05),
-                max_premium_pct=getattr(self._size_profile, 'max_options_premium_pct', 0.05),
-            )
-            overlays.append(TradeRecommendation(
-                ticker=ticker,
-                direction="long",
-                position_size_pct=0.0,
-                confidence=0.7,
-                rationale=c.get("rationale", "covered call overlay"),
-                vehicle="option",
-                option_spec=spec,
-            ))
-        return overlays
-
-    def _llm_covered_call_overlay(
-        self,
-        positions: list[dict],
-        iv_data: dict[str, dict],
-        earnings_dates: dict[str, int],
-        trading_date: str,
-    ) -> list[dict]:
-        """Ask LLM which positions to overlay with covered calls."""
-        if self._get_client() is None:
-            return []
-
-        pos_lines = []
-        for p in positions[:10]:
-            ticker = p.get("ticker", "?")
-            iv = iv_data.get(ticker, {})
-            earnings_days = earnings_dates.get(ticker, "unknown")
-            # Commodity ETFs have no earnings risk
-            from tradingagents.strategies.modules.commodity_macro import COMMODITY_ETFS
-            if ticker in COMMODITY_ETFS:
-                earnings_days = 999
-            pos_lines.append(
-                f"  {ticker}: entry=${p.get('entry_price', 0):.0f}, "
-                f"shares={p.get('shares', 0)}, "
-                f"IV={iv.get('iv', 'N/A')}, IV_rank={iv.get('iv_rank', 'N/A')}, "
-                f"earnings_in={earnings_days} days"
-            )
-
-        prompt = f"""Date: {trading_date}
-
-Current long positions:
-{chr(10).join(pos_lines)}
-
-Which positions are good candidates for covered call overlays?
-Consider: IV rank (higher = better for selling calls), upcoming earnings (avoid if <10 days),
-days held (prefer >14 days), and overall conditions.
-
-Return ONLY a JSON array of objects with keys: ticker, strike_offset_pct (e.g. 0.05 for 5% OTM),
-expiry_days (target DTE), rationale (under 60 chars). Return empty array [] if no good candidates."""
-
-        try:
-            text = self._call_llm(
-                system="You are a portfolio manager specializing in options overlays. Be conservative.",
-                prompt=prompt,
-                max_tokens=2048,
-            )
-            if text.startswith("```"):
-                lines = text.split("\n")
-                lines = [line for line in lines if not line.strip().startswith("```")]
-                text = "\n".join(lines)
-            data = json.loads(text)
-            return data if isinstance(data, list) else []
-        except Exception:
-            logger.warning("Covered call overlay LLM call failed", exc_info=True)
-            return []
 
     def _get_client(self):
         """Lazy-init the selected provider."""

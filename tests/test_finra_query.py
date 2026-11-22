@@ -214,13 +214,30 @@ def test_durable_schema_rejects_identity_scope_and_provenance_contradictions(mon
         module.validated_acquisition(value)
 
 
-def test_calendar_failure_still_has_valid_error_receipt(monkeypatch):
-    calls, _ = transport(monkeypatch, [])
+def test_2027_dynamic_settlement_query_succeeds_and_rejects_stale_rows(monkeypatch):
+    jan20_2027 = datetime(2027, 1, 20, 12, tzinfo=timezone.utc)
+    fresh_rows = [
+        row('AAPL', settlementDate='2026-12-31', accountingYearMonthNumber=20261231),
+        row('AAPL', settlementDate='2026-12-15', accountingYearMonthNumber=20261215),
+    ]
+    calls, sessions = transport(monkeypatch, [Response(fresh_rows)])
+    module, attempt, values, errors = acquire(['AAPL'], acquired_at=jan20_2027)
+    assert errors == {}
+    assert values['AAPL']['date'] == '2026-12-31'
+    assert attempt['status'] == 'success'
+    assert attempt['query_coverage']['required_settlement_date'] == '2026-12-31'
+    assert calls[0][1]['json']['compareFilters'][0]['compareType'] == 'GTE'
+    module.validated_acquisition(receipt(module, attempt, ['AAPL']))
+
+    # Stale >28d row in 2027 must fail closed.
+    feb20_2027 = datetime(2027, 2, 20, 12, tzinfo=timezone.utc)
+    stale_rows = [row('AAPL', settlementDate='2027-01-15', accountingYearMonthNumber=20270115)]
+    transport(monkeypatch, [Response(stale_rows)])
     module = importlib.import_module('tradingagents.strategies.data_sources.finra_query')
     attempt = module.new_attempt()
-    with pytest.raises(SourceFetchError):
-        module.acquire(['AAPL'], attempt, acquired_at=datetime(2027, 1, 2, tzinfo=timezone.utc))
-    assert calls == [] and attempt['query_coverage'] is None
+    with pytest.raises(SourceFetchError) as failure:
+        module.acquire(['AAPL'], attempt, acquired_at=feb20_2027)
+    assert failure.value.reason_code == 'invalid_response'
     module.validated_acquisition(receipt(module, attempt, ['AAPL']))
 
 

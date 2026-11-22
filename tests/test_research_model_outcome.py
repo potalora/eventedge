@@ -43,12 +43,12 @@ def worker(tmp_path, monkeypatch):
 
 def candidate(**metadata):
     return Candidate(ticker='CFR', date='2026-10-12', metadata={
-        'needs_llm_analysis': True, 'analysis_type': 'filing_change', 'current_text': 'retained source',
-        'discovery_id': 'filing-discovery', **metadata})
+        'needs_llm_analysis': True, 'analysis_type': 'earnings_call', 'transcript_text': 'retained source',
+        'text_source': 'transcript', 'discovery_id': 'earnings-discovery', **metadata})
 
 
 def enrich(worker, value=None):
-    return worker._enrich_with_llm([value or candidate()], 'filing_analysis')[0]
+    return worker._enrich_with_llm([value or candidate()], 'earnings_call')[0]
 
 
 def assert_outcome(value, request=None, response=None, *, status='validated', reason=None):
@@ -98,7 +98,7 @@ def test_pre_call_source_failure_does_not_inherit_previous_request_response_or_p
     engine, calls, _ = worker
     good = enrich(engine)
     assert_outcome(good, calls[0], VALID)
-    bad = enrich(engine, candidate(current_text=''))
+    bad = enrich(engine, candidate(transcript_text=''))
     outcome = assert_outcome(bad, status='failed', reason='missing_source_text')
     assert len(calls) == 1 and outcome['model_provenance'] == {}
     assert engine._analyzer.last_call_failure == ''
@@ -128,7 +128,7 @@ def test_pre_call_deadline_reset_does_not_inherit_successful_attempt(worker):
     enrich(engine)
     result = candidate(discovery_id='second')
     with model_budget(time.monotonic() - 1):
-        engine._analyze_candidate(result, 'filing_analysis', {}, engine._analyzer)
+        engine._analyze_candidate(result, 'earnings_call', {}, engine._analyzer)
     assert len(calls) == 1
     outcome = assert_outcome(result, status='failed', reason='model_deadline_exhausted')
     assert outcome['model_provenance'] == {}
@@ -154,16 +154,16 @@ def test_later_timeout_holds_entire_sample_without_rewriting_earlier_assessment(
     engine, calls, _ = worker
     clock = [100.0]
     monkeypatch.setattr('tradingagents.strategies.runtime_deadline.time.monotonic', lambda: clock[0])
-    analyze = engine._analyzer.analyze_filing_change
+    analyze = engine._analyzer.analyze_earnings_call
 
     def second_expires(*args, **kwargs):
         if len(calls) == 1:
             clock[0] = 111.0
         return analyze(*args, **kwargs)
 
-    monkeypatch.setattr(engine._analyzer, 'analyze_filing_change', second_expires)
+    monkeypatch.setattr(engine._analyzer, 'analyze_earnings_call', second_expires)
     with model_budget(110.0):
-        result = engine._enrich_with_llm([candidate(), candidate(discovery_id='second')], 'filing_analysis')
+        result = engine._enrich_with_llm([candidate(), candidate(discovery_id='second')], 'earnings_call')
     assert len(calls) == 1
     assert all(row.journal_only and row.metadata['analysis_failure_reason'] == 'model_deadline_exhausted' for row in result)
     assert_outcome(result[0], calls[0], VALID)

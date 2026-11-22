@@ -23,7 +23,7 @@ def build_recovered(pipeline, monkeypatch, *, original='failed', include_preflig
         return complete(ledger, *args, **kwargs)
     monkeypatch.setattr(PortfolioLedger, 'complete_staging', interrupt)
     if include_preflight:
-        fixture.fault = 'edgar_timeout'
+        fixture.fault = 'finnhub_timeout'
         fixture.manager.run_preflight(SESSION.isoformat(), mode='screen')
         fixture.fault = None
     if original == 'failed':
@@ -102,10 +102,11 @@ def test_recovery_report_rejects_changed_receipt_or_accepted_proof(pipeline, mon
         (state / 'generation-config.json').write_text('{}')
     else:
         import sqlite3
-        book = next(state.glob('horizon_*/portfolio.db'))
+        from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
+        book = state / GENERATION_DB_FILENAME
         with sqlite3.connect(book) as connection:
             if damage == 'cash':
-                connection.execute("UPDATE cash_events SET amount='1.00' WHERE session=?", (str(SESSION),))
+                connection.execute("UPDATE cash_events SET amount='1.00'")
             else:
                 connection.execute("UPDATE committee_decisions SET payload_json='{}'")
     report = build_operational_report(repo, GENERATION, str(SESSION), snapshot_guaranteed=True)

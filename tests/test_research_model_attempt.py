@@ -145,9 +145,9 @@ def test_exact_candidate_reuse_keeps_request_receipt_with_one_physical_call(tran
     receipts = []
     with candidate_response_memo():
         for _ in range(2):
-            token = begin_candidate_response('filing_analysis', 'filing_change', 'discovery', False)
+            token = begin_candidate_response('earnings_call', 'earnings_call', 'discovery', False)
             try:
-                result = analyzer.analyze_filing_change('retained', '', 'CFR')
+                result = analyzer.analyze_earnings_call('retained', 'CFR')
                 assert result is not None and result['direction'] == 'long'
                 commit_candidate_response()
                 receipts.append(deepcopy(analyzer.last_research_request))
@@ -161,10 +161,10 @@ def test_analyzer_parse_failure_keeps_current_actual_request(transport):
     client, calls, outcomes = transport
     analyzer = LLMAnalyzer(config())
     analyzer._client = client
-    assert analyzer.analyze_filing_change('first source', '', 'CFR')['direction'] == 'long'
+    assert analyzer.analyze_earnings_call('first source', 'CFR')['direction'] == 'long'
     first = deepcopy(analyzer.last_research_request)
     outcomes.append('not-json')
-    assert analyzer.analyze_filing_change('second source', '', 'CFR') == {}
+    assert analyzer.analyze_earnings_call('second source', 'CFR') == {}
     assert len(calls) == 2
     assert first['request_sha256'] != analyzer.last_research_request['request_sha256']
     api().validate_request_receipt(analyzer.last_research_request, role='thesis',
@@ -177,9 +177,9 @@ def test_committee_grounded_recommendation_or_invalid_attribution_keeps_exact_re
     committee = PortfolioCommittee(config())
     committee._client = client
     outcomes.append(json.dumps([dict(ticker=ticker, direction='long', position_size_pct=0.05,
-        confidence=0.8, rationale='Retained source catalyst', contributing_strategies=['filing_analysis'])]))
+        confidence=0.8, rationale='Retained source catalyst', contributing_strategies=['earnings_call'])]))
     recs = committee.synthesize([dict(ticker='CFR', direction='long', score=2.5,
-                                     strategy='filing_analysis', metadata={})])
+                                     strategy='earnings_call', metadata={})])
     assert bool(recs) is (ticker == 'CFR')
     assert committee.last_decision_status['status'] == status
     api().validate_request_receipt(committee.last_decision_status['model_request'], role='committee',
@@ -193,7 +193,7 @@ def test_committee_durable_status_records_attempt_even_when_failed(transport, re
     committee._client = client
     outcomes.append({'valid': '[]', 'invalid': 'not-json', 'failure': RuntimeError('offline failure'),
                      'deadline': 'unused'}[result])
-    signals = [dict(ticker='CFR', direction='long', score=2.5, strategy='filing_analysis', metadata={})]
+    signals = [dict(ticker='CFR', direction='long', score=2.5, strategy='earnings_call', metadata={})]
     with model_budget(time.monotonic() + (-1 if result == 'deadline' else 10)):
         assert committee.synthesize(signals) == []
     assert len(calls) == (0 if result == 'deadline' else 1)
@@ -229,7 +229,7 @@ def test_legacy_calls_have_no_new_request_authority(transport):
     analyzer._client = committee._client = client
     analyzer._call_llm('sys', 'user')
     outcomes.append('[]')
-    committee.synthesize([dict(ticker='CFR', direction='long', score=2.5, strategy='filing_analysis', metadata={})])
+    committee.synthesize([dict(ticker='CFR', direction='long', score=2.5, strategy='earnings_call', metadata={})])
     assert len(calls) == 2
     assert analyzer.last_research_request is None and committee.last_research_request is None
     assert 'model_request' not in committee.last_decision_status
@@ -242,9 +242,9 @@ def _committee_output_contract_case(transport, profile):
         size_profile=None if profile == 'legacy' else SIZE_PROFILES[profile])
     committee._client = client
     signals = [dict(ticker='CFR', direction='long', score=2.5,
-        strategy='filing_analysis', metadata={})]
+        strategy='earnings_call', metadata={})]
     signals += [dict(ticker='SHT', direction='short', score=2.5,
-        strategy=strategy, metadata={}) for strategy in ('litigation', 'supply_chain')]
+        strategy=strategy, metadata={}) for strategy in ('govt_contracts', 'supply_chain')]
     return committee, calls, outcomes, signals
 
 
@@ -275,7 +275,7 @@ def _assert_transmitted_committee_output_contract(committee, calls, profile):
 def test_transmitted_committee_contract_keeps_lowercase_long_and_exact_request(transport, profile):
     committee, calls, outcomes, signals = _committee_output_contract_case(transport, profile)
     outcomes.append(json.dumps([dict(ticker='CFR', direction='long', position_size_pct=0.05,
-        confidence=0.8, rationale='Retained source catalyst', contributing_strategies=['filing_analysis'])]))
+        confidence=0.8, rationale='Retained source catalyst', contributing_strategies=['earnings_call'])]))
     recommendations = committee.synthesize(signals)
     assert [(row.ticker, row.direction) for row in recommendations] == [('CFR', 'long')]
     assert committee.last_decision_status['status'] == 'selected'
@@ -286,7 +286,7 @@ def test_transmitted_committee_contract_keeps_lowercase_long_and_exact_request(t
 def test_transmitted_committee_contract_keeps_convergent_lowercase_short(transport, profile):
     committee, calls, outcomes, signals = _committee_output_contract_case(transport, profile)
     outcomes.append(json.dumps([dict(ticker='SHT', direction='short', position_size_pct=0.05,
-        confidence=0.8, rationale='Two retained catalysts', contributing_strategies=['litigation', 'supply_chain'])]))
+        confidence=0.8, rationale='Two retained catalysts', contributing_strategies=['govt_contracts', 'supply_chain'])]))
     recommendations = committee.synthesize(signals)
     assert [(row.ticker, row.direction) for row in recommendations] == [('SHT', 'short')]
     assert committee.last_decision_status['status'] == 'selected'
@@ -301,10 +301,10 @@ def test_uppercase_committee_row_rejects_whole_response_without_fallback(transpo
         raise AssertionError('invalid model response must never use rule fallback')
     monkeypatch.setattr(committee, '_rule_based_synthesize', forbidden_fallback)
     valid = dict(ticker='CFR', direction='long', position_size_pct=0.05,
-        confidence=0.8, rationale='Retained source catalyst', contributing_strategies=['filing_analysis'])
+        confidence=0.8, rationale='Retained source catalyst', contributing_strategies=['earnings_call'])
     invalid = dict(ticker='CFR' if uppercase == 'LONG' else 'SHT', direction=uppercase,
         position_size_pct=0.05, confidence=0.8, rationale='Retained source catalyst',
-        contributing_strategies=['filing_analysis'] if uppercase == 'LONG' else ['litigation', 'supply_chain'])
+        contributing_strategies=['earnings_call'] if uppercase == 'LONG' else ['govt_contracts', 'supply_chain'])
     outcomes.append(json.dumps([valid, invalid]))
     assert committee.synthesize(signals) == []
     status = committee.last_decision_status

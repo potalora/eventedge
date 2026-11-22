@@ -72,7 +72,7 @@ def test_frozen_bundle_reuses_exact_first_values_and_failures(tmp_path):
 
 def test_codec_rejects_unknown_tags_deep_and_oversized_documents():
     with pytest.raises(SourceInputError):
-        SourceInputStore.decode('{"$type":"pickle","value":"unsafe"}')
+        SourceInputStore.decode('{"$t":"pickle","v":"unsafe"}')
     with pytest.raises(SourceInputError):
         SourceInputStore.decode('[' * 100 + '0' + ']' * 100)
     with pytest.raises(SourceInputError):
@@ -118,16 +118,16 @@ def test_engine_partial_inputs_preserved_but_next_phase_fetches_again(tmp_path):
 
 
 def test_queued_source_deadline_starts_at_acquisition_not_worker_start(tmp_path, monkeypatch):
-    import tradingagents.strategies.orchestration.multi_strategy_engine as module
+    import tradingagents.strategies.orchestration.data_acquisition as da_module
     import time
     engine = _engine(tmp_path)
     calls = []
     engine._fetch_fred_data = lambda *args: calls.append('requested') or {}
     monkeypatch.setenv('AUTORESEARCH_FETCH_TIMEOUT_S', '0.001')
-    def delayed_gather(fetches, timeout):
+    def delayed_gather(fetches, timeout, on_error=None):
         time.sleep(0.005)
         return {name: fn(*args) for name, (fn, args) in fetches.items()}
-    monkeypatch.setattr(module, '_gather_with_timeout', delayed_gather)
+    monkeypatch.setattr(da_module, '_gather_with_timeout', delayed_gather)
     data = engine._fetch_all_data('2026-07-08', '2026-10-06')
     assert not calls
     assert data['fred']['error']
@@ -273,26 +273,25 @@ def test_freeze_durably_syncs_file_and_parent_directory(tmp_path, monkeypatch):
     assert synced == [False, True]
 
 
-@pytest.mark.parametrize('source', [None, 'regulations'])
-def test_complete_regulatory_graphics_have_finite_prospective_codec_capacity(source):
-    from tradingagents.strategies.orchestration.source_inputs import source_codec_limits, MAX_NODES
-    config = {'autoresearch': {'regulation_evidence_policy':'complete_document_text_v1',
-        'regulation_retrieval_policy':'verified_government_copy_v3'}}
-    assert source_codec_limits(config, source=source) == {'max_bytes':32*1024**2, 'max_nodes':MAX_NODES}
-    # Actual three graphic-bearing rules alone occupy 17,035,497 typed bytes.
-    # The old bound fails visibly; prospective capacity roundtrips without loss.
-    payload = {'material':'x'*(17*1024**2)}
-    with pytest.raises(SourceInputError, match='byte limit'):
-        SourceInputStore.encode(payload)
-    encoded = SourceInputStore.encode(payload, **source_codec_limits(config, source=source))
-    assert SourceInputStore.decode(encoded, **source_codec_limits(config, source=source)) == payload
+def test_large_dataframe_parquet_roundtrip_has_no_node_cap_crash(tmp_path):
+    """Parquet-backed table storage eliminates legacy 500k/8M JSON AST node caps."""
+    import numpy as np
+    import pandas as pd
 
-
-@pytest.mark.parametrize('policy', [None, 'verified_government_copy_v1', 'verified_government_copy_v2'])
-def test_legacy_regulation_codec_capacity_unchanged(policy):
-    from tradingagents.strategies.orchestration.source_inputs import source_codec_limits
-    config = {'autoresearch':{'regulation_evidence_policy':'complete_document_text_v1',
-        'regulation_retrieval_policy':policy}}
-    assert source_codec_limits(config, source='regulations') == {}
-    config['autoresearch']['regulation_retrieval_policy']='verified_government_copy_v3'
-    assert source_codec_limits(config, source='fred') == {}
+    rows = 120_000  # 600k cells — previously blew past the 500k AST node cap
+    frame = pd.DataFrame(
+        {
+            "open": np.linspace(100.0, 200.0, rows),
+            "high": np.linspace(101.0, 201.0, rows),
+            "low": np.linspace(99.0, 199.0, rows),
+            "close": np.linspace(100.5, 200.5, rows),
+            "volume": np.arange(rows, dtype="int64"),
+        },
+        index=pd.date_range("2020-01-01", periods=rows, freq="min"),
+    )
+    store = SourceInputStore(tmp_path / 'cache', accepted_dir=tmp_path / 'accepted')
+    restored = store.freeze(FROZEN, {'yfinance': {'SPY': frame}}, acquired_at=NOW)
+    assert isinstance(restored['yfinance']['SPY'], pd.DataFrame)
+    assert len(restored['yfinance']['SPY']) == rows
+    reloaded = store.load_frozen(FROZEN)
+    pd.testing.assert_frame_equal(reloaded['yfinance']['SPY'], frame, check_freq=False)

@@ -19,7 +19,6 @@ import sqlite3
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.strategies.modules import get_paper_trade_strategies
-from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
 from . import operational_report as report_io
 from .generation_config import apply_generation_config
 from .local_continuity import REQUIRED_CHECKS, classify_session
@@ -75,8 +74,8 @@ def _native(provenance, request=None, *, role=None):
     """Native success has returned identity/response plus plan billing evidence."""
     _require(type(provenance) is dict)
     model = provenance.get('configured_model')
-    expected = 'gpt-6-luna' if role == 'bounded' else 'gpt-6.1-sol'
-    _require(model == expected and provenance.get('returned_model') == model
+    expected = {'gpt-6-luna'} if role == 'bounded' else {'gpt-6.1-sol', 'gpt-6.2-sol'}
+    _require(model in expected and provenance.get('returned_model') == model
         and provenance.get('reasoning_effort') == 'high'
         and provenance.get('billing_mode') == 'chatgpt_plan'
         and provenance.get('effective_output_limit') is None
@@ -105,15 +104,26 @@ def _screening(state, source, epoch, config, strategies, wire, session, start, f
         'strategies':sorted(strategies)}
     identity = {**source['identity'],'purpose':VERSION,'epoch_id':epoch,
         'research_resilience_policy':POLICY,'screening_binding_sha256':_digest(store,binding)}
+    acquired = envelope.get('acquired_at')
+    if isinstance(acquired, str):
+        acquired = datetime.fromisoformat(acquired)
+    source_acquired = source.get('acquired_at')
+    if isinstance(source_acquired, str):
+        source_acquired = datetime.fromisoformat(source_acquired)
+    if isinstance(start, str):
+        start = datetime.fromisoformat(start)
+    if isinstance(finish, str):
+        finish = datetime.fromisoformat(finish)
     _require(set(envelope)=={'version','identity','acquired_at','payload','digest'}
         and envelope['version']==CONTRACT_VERSION and envelope['identity']==identity
         and envelope['digest']==hashlib.sha256(SourceInputStore.encode(envelope['payload'],**limits).encode()).hexdigest()
-        and isinstance(envelope['acquired_at'],datetime) and envelope['acquired_at'].tzinfo is not None
-        and start<=source['acquired_at']<=envelope['acquired_at']<=finish)
+        and isinstance(acquired,datetime) and acquired.tzinfo is not None
+        and isinstance(source_acquired,datetime) and source_acquired.tzinfo is not None
+        and start<=source_acquired<=acquired<=finish)
     sample, coverage, receipt = _decode(store,envelope['payload'],binding,date.fromisoformat(session))
     _require(coverage == {'complete':True})
     _require(all(row.get('research_screening_receipt')==receipt for row in wire.values()))
-    with report_io._database(state/'metrics_v2.sqlite3') as db:
+    with report_io._database(report_io._metrics_db_path(state)) as db:
         durable = [json.loads(row[0]) for row in db.execute(
             'SELECT payload_json FROM strategy_health WHERE session=?',(session,))]
     for row in durable:
@@ -137,19 +147,18 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
         manifest = report_io._load_json(repo/'data/generations/manifest.json')
         matches=[item for item in manifest['generations'] if item['gen_id']==generation]
         _require(len(matches)==1)
-        from .source_retirement import generation_for_session, config_path_for_generation
-        metadata=generation_for_session(matches[0],session)
+        metadata=matches[0]
         state=Path(metadata['state_dir'])
         state=state if state.is_absolute() else repo/state
         _require(metadata['git_commit']==expected_commit and metadata['config_sha256']==expected_profile
-            and config_path_for_generation(metadata).parent==state
-            and Path(metadata['config_file']).name in {'generation-config.json','generation-config-congress-retired.json'})
+            and Path(metadata['config_file']).parent==state
+            and Path(metadata['config_file']).name == 'generation-config.json')
         config=apply_generation_config(DEFAULT_CONFIG,metadata['config_file'],expected_profile)
         ar=config['autoresearch']
         _require(ar.get('research_resilience_policy')==POLICY and ar.get('llm_billing_mode')=='chatgpt_plan'
             and ar.get('autoresearch_model')=='gpt-6-luna' and ar.get('llm_effort')=='high'
-            and ar.get('thesis_model')=='gpt-6.1-sol' and ar.get('thesis_effort')=='high'
-            and ar.get('paper_trade',{}).get('portfolio_committee_model')=='gpt-6.1-sol'
+            and ar.get('thesis_model') in ('gpt-6.1-sol', 'gpt-6.2-sol') and ar.get('thesis_effort')=='high'
+            and ar.get('paper_trade',{}).get('portfolio_committee_model') in ('gpt-6.1-sol', 'gpt-6.2-sol')
             and ar.get('paper_trade',{}).get('portfolio_committee_effort')=='high'
             and ar.get('paper_trade',{}).get('portfolio_committee_enabled') is True)
         report=report_io.build_operational_report(repo,generation,session,snapshot_guaranteed=True)
@@ -177,20 +186,12 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
             and session_close(day)<=start<=finish<session_open(next_session(day)))
         slot=configuration_fingerprint({'generation':generation,'session':session})
         source=report_io._accepted_envelope(state/'source_inputs'/(slot+'.json'),generation,session,expected_commit)
-        strategies={strategy.name:strategy for strategy in configure_strategies(get_paper_trade_strategies(),ar)}
-        from .filing_research_policy import configured as filing_disabled
-        excluded=filing_disabled(ar)
-        edgar=source['payload'].get('edgar',{})
-        excluded=excluded and edgar.get('error')=='filing_research_disabled' and edgar.get('coverage')=={
-            'complete':False,'reason':'filing_research_disabled','filing_research_policy':'disabled_v1'}
-        if excluded:
-            row['approved_exclusions'].append({'provider':'edgar','reason':'filing_research_disabled','policy':'disabled_v1'})
+        strategies={strategy.name:strategy for strategy in get_paper_trade_strategies()}
         observations=report['sources'].get('observations',{})
         row['source_observations']=observations
-        required={provider for strategy in strategies.values() for provider in strategy.data_sources if provider!='openbb'}
-        failures=[provider for provider in required if observations.get(provider) not in ('success','success_empty','complete')
-                  and not (excluded and provider=='edgar')]
-        failures += [item['provider'] for item in report['sources']['unresolved'] if not(excluded and item['provider']=='edgar')]
+        required={provider for strategy in strategies.values() for provider in strategy.data_sources if provider not in {'openbb', 'enrichment'}}
+        failures=[provider for provider in required if observations.get(provider) not in ('ok','success','success_empty','complete')]
+        failures += [item['provider'] for item in report['sources']['unresolved']]
         row['unexpected_failures']=sorted(set(failures))
         checks['sources']=not failures
         sample=_screening(state,source,epoch,config,strategies,wire,session,start,finish)
@@ -246,12 +247,18 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
             committee=committee and valid
             if not valid:
                 row['research_holds'].append('committee:'+name)
-            with report_io._database(state/name/'portfolio.db') as db:
-                decisions=db.execute('SELECT epoch_id,policy_id,payload_json FROM committee_decisions WHERE session=?',(session,)).fetchall()
+            db_path, unified = report_io._cohort_db_path(state, name)
+            with report_io._database(db_path) as db:
+                if unified:
+                    decisions=db.execute('SELECT epoch_id,policy_id,payload_json FROM committee_decisions WHERE cohort_id=? AND session=?',(name,session)).fetchall()
+                    carried = db.execute('SELECT 1 FROM lots WHERE cohort_id=? AND opened_session<? AND CAST(open_qty AS REAL)>0 LIMIT 1',(name,session)).fetchone()
+                else:
+                    decisions=db.execute('SELECT epoch_id,policy_id,payload_json FROM committee_decisions WHERE session=?',(session,)).fetchall()
+                    carried = db.execute('SELECT 1 FROM lots WHERE opened_session<? AND CAST(open_qty AS REAL)>0 LIMIT 1',(session,)).fetchone()
                 _require(len(decisions)==1 and decisions[0]['epoch_id']==epoch
                     and decisions[0]['policy_id']==ar['paper_ledger']['policy_id']
                     and json.loads(decisions[0]['payload_json'])['status']==status)
-                if db.execute('SELECT 1 FROM lots WHERE opened_session<? AND CAST(open_qty AS REAL)>0 LIMIT 1',(session,)).fetchone():
+                if carried:
                     row['carried_positions_observed']=True
             if status.get('status') in ('selected','abstained'):
                 models.add(_native(status.get('model_provenance'),status.get('model_request'),role='committee'))

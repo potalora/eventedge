@@ -127,6 +127,8 @@ class FillResult:
     status: Literal["filled", "rejected", "pending"]
     fill: Fill | None
     reason: str
+    trimmed_at_open: bool = False
+    requested_qty: int | None = None
 
 
 @dataclass(frozen=True)

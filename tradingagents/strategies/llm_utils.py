@@ -5,9 +5,9 @@ from typing import Any
 
 from .runtime_deadline import (ModelDeadlineExceeded, ModelTransportError, bounded_transport, model_timeout)
 
-SONNET_5_MODEL = "claude-sonnet-5"
+SOL_MODEL = "gpt-6.2-sol"
 LUNA_MODEL = "gpt-6-luna"
-RESPONSES_MODELS = frozenset({"gpt-6-luna", "gpt-6-astra", "gpt-6.1-sol"})
+RESPONSES_MODELS = frozenset({"gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-sol"})
 
 
 def uses_responses(model: str) -> bool:
@@ -15,20 +15,15 @@ def uses_responses(model: str) -> bool:
 
 
 _VALID_EFFORTS = frozenset({"low", "medium", "high", "max"})
+_ANTHROPIC_EFFORT_MODELS = frozenset({"claude-sonnet-4-6", "claude-opus-4-6"})
 
 
 def anthropic_request_options(
     *, model: str, temperature: float, effort: str
 ) -> dict[str, Any]:
-    """Return request options that are valid for the selected Claude model.
-
-    Sonnet 5 rejects non-default sampling parameters. It uses adaptive thinking
-    by default, with ``output_config.effort`` as the supported cost/quality
-    control. Older configured models retain the existing temperature behavior.
-    """
-    if model != SONNET_5_MODEL:
+    """Return request options that are valid for the selected Claude model."""
+    if model not in _ANTHROPIC_EFFORT_MODELS:
         return {"temperature": temperature}
-
     normalized_effort = str(effort or "medium").lower()
     if normalized_effort not in _VALID_EFFORTS:
         raise ValueError(
@@ -115,42 +110,18 @@ def call_analysis_model(
     Native supported clients run in a disposable process, with SDK retries off.
     """
     from .chatgpt_plan_client import ChatGPTPlanClient
-    graphics_route = regulation_graphics_model_policy is not None
-    if graphics_route:
-        if not isinstance(client, ChatGPTPlanClient):
-            raise ValueError('invalid_regulation_graphics_model_policy')
-        from .plan_document_inputs import encode_document_inputs
-        from .regulation_graphics_route import validate_regulation_graphics_route
-        encoded_documents = encode_document_inputs(document_inputs)
-        validate_regulation_graphics_route(model_policy=regulation_graphics_model_policy,
-            model=model, effort=effort, document_inputs=encoded_documents,
-            max_tokens=max_tokens, temperature=temperature, max_call_seconds=max_call_seconds)
+    if document_inputs is not None or regulation_graphics_model_policy is not None:
+        raise ValueError("invalid_request")
     if max_call_seconds is not None:
-        if type(max_call_seconds) not in (int, float) or max_call_seconds not in (120, 240):
+        if type(max_call_seconds) not in (int, float) or max_call_seconds != 120:
             raise ValueError("invalid_model_call_cap")
-        if max_call_seconds == 240 and not graphics_route and (not isinstance(client, ChatGPTPlanClient)
-                or model != LUNA_MODEL or effort != 'high' or temperature != 0.0
-                or document_inputs is None):
-            raise ValueError("invalid_model_call_cap")
-    if document_inputs is not None and not graphics_route:
-        if not isinstance(client, ChatGPTPlanClient) or model != LUNA_MODEL:
-            raise ValueError("document_inputs_require_luna_plan")
-        from .plan_document_inputs import encode_document_inputs
-        encoded_documents = encode_document_inputs(document_inputs)
     timeout = model_timeout() if max_call_seconds is None else model_timeout(max_call_seconds)
     request = dict(model=model, system=system, prompt=prompt, max_tokens=max_tokens,
                    temperature=temperature, effort=effort)
-    if document_inputs is not None:
-        request["document_inputs"] = encoded_documents
-    if graphics_route:
-        request['regulation_graphics_model_policy'] = regulation_graphics_model_policy
-        request['max_call_seconds'] = max_call_seconds
     if provenance is not None:
         provenance.clear()
         provenance.update(configured_model=model, returned_model=None, returned_revision=None,
                           identity_status="unpinned", response_id=None, reasoning_effort=effort)
-        if graphics_route:
-            provenance['regulation_graphics_model_policy'] = regulation_graphics_model_policy
     # Include supported SDK subclasses; injected call primitives are not SDKs.
     native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
     module = ("chatgpt_plan" if isinstance(client, ChatGPTPlanClient) else

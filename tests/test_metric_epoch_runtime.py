@@ -74,7 +74,7 @@ def test_next_candidate_sol_roles_rotate_identity_from_prior_astra_roles():
         portfolio_committee_effort=ar["paper_trade"]["portfolio_committee_effort"])
     prior = {**models, "thesis_model": "gpt-6-astra", "portfolio_committee_model": "gpt-6-astra"}
     assert models["autoresearch_model"] == prior["autoresearch_model"] == "gpt-6-luna"
-    assert models["thesis_model"] == models["portfolio_committee_model"] == "gpt-6.1-sol"
+    assert models["thesis_model"] == models["portfolio_committee_model"] == "gpt-6.2-sol"
     assert _context(models=models).behavior_hash != _context(models=prior).behavior_hash
 
 
@@ -349,6 +349,9 @@ def test_profile_bound_portfolio_policy_version_rotates_epoch_config_hash(
     tmp_path,
 ) -> None:
     baseline_config = deepcopy(DEFAULT_CONFIG)
+    baseline_config["autoresearch"]["portfolio_policy"]["version"] = (
+        "portfolio_policy_v1"
+    )
     changed_config = deepcopy(DEFAULT_CONFIG)
     changed_config["autoresearch"]["portfolio_policy"]["version"] = (
         "portfolio_policy_v2"

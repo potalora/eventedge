@@ -10,8 +10,7 @@ from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 
 def test_cftc_failure_recovers_next_session_without_revising_accepted_evidence(pipeline, monkeypatch):
     fixture, owner, config, _ = pipeline
-    config['autoresearch'].update(filing_research_policy='disabled_v1',
-                                 research_resilience_policy='dependency_isolation_v1')
+    config['autoresearch'].update(research_resilience_policy='dependency_isolation_v1')
     original = CFTCSource._fetch_raw_report
     failed = True
 
@@ -36,7 +35,7 @@ def test_cftc_failure_recovers_next_session_without_revising_accepted_evidence(p
     fixture.session = date(2026, 10, 5)
     fixture.now = datetime(2026, 10, 5, 22, tzinfo=timezone.utc)
     second, second_wire, second_report = run_campaign(pipeline, fixture.session)
-    assert second['outcome'] == 'degraded'  # EDGAR stays deliberately disabled.
+    assert second['outcome'] == 'clean'
     assert second_report['accounting_valid'] and second_report['staging_complete']
     assert all(row['execution_valid'] and row['staging_valid'] for row in second_wire.values())
     recovered = [row for row in owner._metric_store.read_strategy_health(session=fixture.session)
@@ -54,7 +53,7 @@ def test_cftc_failure_recovers_next_session_without_revising_accepted_evidence(p
     calls, models = fixture.calls.copy(), fixture.model_calls.copy()
     fixture.block_all = True
     replay, _, replay_report = run_campaign(pipeline, fixture.session)
-    assert replay['outcome'] == 'degraded'
+    assert replay['outcome'] == 'clean'
     assert replay_report['accounting_valid'] and replay_report['staging_complete']
     assert accepted_input_bytes(config) == second_inputs
     assert ledgers() == before_replay

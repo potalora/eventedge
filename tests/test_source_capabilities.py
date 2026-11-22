@@ -155,7 +155,7 @@ def test_yahoo_failed_vix_keeps_complete_research_basket(tmp_path):
     owner = yahoo_engine(tmp_path, vix_failure=True)
     payload = owner._fetch_yfinance_data('2026-09-01', '2026-10-06')
     selected, scope = rr.project_sources({'yfinance': payload}, ['yfinance'], capability_policy=POLICY)
-    assert len(selected['yfinance']['prices']) == 37
+    assert len(selected['yfinance']['prices']) == 13
     assert 'vix' not in selected['yfinance']
     assert scope['capabilities']['yfinance.research_prices']['status'] == 'usable'
 
@@ -259,36 +259,6 @@ def test_accepted_capability_cannot_hide_contradictory_coverage_or_clock(tmp_pat
         payload['BAMLH0A0HYM2'].attrs.update(acquired_at='2099-01-01T00:00:00+00:00', available_at='2099-01-01T00:00:00+00:00')
     if corruption == 'noncanonical_date': payload['_capability_acquisition']['observation_end'] = '20261006'
     with pytest.raises(ValueError, match='source_capability'):
-        project(payload)
-
-
-def test_state_compartment_retains_accepted_snapshot_independent_of_payroll(tmp_path):
-    from test_state_economics_policy import snapshot, config
-    payload = fred_payload(tmp_path, ['PAYEMS'])
-    payload.update(state_unemployment=snapshot(), state_exposure_registry=config()['state_exposure_manifest'],
-        state_policy_settings={'policy': 'state_unemployment_v1', 'release_lookback_days': 7})
-    payload['coverage'] = {'state_unemployment': payload['state_unemployment']['coverage']}
-    selected, scope = project(payload)
-    assert selected['fred']['state_unemployment'] == payload['state_unemployment']
-    assert rr.strategy_capability_holds(scope, 'state_economics', ['fred', 'edgar']) == []
-    assert scope['research_coverage_complete'] is False
-
-
-def test_incomplete_state_compartment_holds_state_only_and_corruption_raises(tmp_path):
-    from test_state_economics_policy import snapshot, config
-    payload = fred_payload(tmp_path)
-    state = snapshot(); state['states'].pop('AL')
-    state['coverage'] = {'expected_states': 51, 'accepted_states': 50,
-        'failed_states': {'AL': 'timeout'}, 'complete': False}
-    payload.update(state_unemployment=state, state_exposure_registry=config()['state_exposure_manifest'],
-        state_policy_settings={'policy': 'state_unemployment_v1', 'release_lookback_days': 7},
-        coverage={'state_unemployment': state['coverage']})
-    selected, scope = project(payload)
-    assert 'state_unemployment' not in selected['fred']
-    assert rr.strategy_capability_holds(scope, 'state_economics', ['fred']) == ['fred.state_unemployment']
-    assert rr.strategy_capability_holds(scope, 'commodity_macro', ['fred']) == []
-    payload['coverage']['state_unemployment'] = {'complete': True}
-    with pytest.raises(ValueError):
         project(payload)
 
 

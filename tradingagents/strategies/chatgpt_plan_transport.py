@@ -152,15 +152,16 @@ def _slot(event):
 
 
 def _informational_metadata(event, response_id):
-    """Accept only the observed extension envelope, never response authority.
+    """Accept bounded informational metadata without letting it supply content or completion.
 
-    This is our bounded adapter contract, not an assertion of documented
-    upstream semantics. Only the observed all-clear moderation shape qualifies.
-    Category names are opaque bounded labels; their exact vocabulary is not
-    verified. Metadata never supplies response content, identity or completion.
+    Enforces identity binding, byte/depth/node limits, and explicit moderation
+    refusal checks (is_blocked is True -> response_refused), while safely
+    ignoring unknown informational fields.
     """
-    if set(event) != {"type", "sequence_number", "response_id", "metadata"}:
+    if "response_id" not in event or "metadata" not in event:
         _fail("stream_invalid")
+    if event.get("error") is not None:
+        _fail(_error_code(event["error"]))
     identity = event["response_id"]
     body = event["metadata"]
     if type(identity) is not str or not identity.strip() or response_id is None or identity != response_id or type(body) is not dict:
@@ -175,43 +176,14 @@ def _informational_metadata(event, response_id):
         if depth > MAX_METADATA_DEPTH or nodes > MAX_METADATA_NODES:
             _fail("stream_invalid")
         if type(value) is dict:
+            if value.get("is_blocked") is True:
+                _fail("response_refused")
             nodes += len(value)  # Keys count toward the same finite budget.
             if nodes > MAX_METADATA_NODES:
                 _fail("stream_invalid")
             pending.extend((child, depth + 1) for child in value.values())
         elif type(value) is list:
             pending.extend((child, depth + 1) for child in value)
-
-    def mapping(value, keys):
-        if type(value) is not dict or set(value) != keys:
-            _fail("stream_invalid")
-        return value
-
-    root = mapping(body, {"openai_chatgpt_moderation_metadata"})
-    wrapper = mapping(root["openai_chatgpt_moderation_metadata"],
-                      {"prompt", "generation", "tool_call", "tool_response"})
-    for key in ("generation", "tool_call", "tool_response"):
-        mapping(wrapper[key], set())
-    prompt = mapping(wrapper["prompt"], {"omnimod"})
-    moderation = mapping(prompt["omnimod"], {"protection_type", "outputs"})
-    if moderation["protection_type"] != "omnimod":
-        _fail("stream_invalid")
-    outputs = moderation["outputs"]
-    if type(outputs) is not list or len(outputs) != 1:
-        _fail("stream_invalid")
-    output = mapping(outputs[0], {"results", "is_blocked"})
-    if output["is_blocked"] is not False:
-        _fail("stream_invalid")
-    results = output["results"]
-    if type(results) is not list or len(results) != 1:
-        _fail("stream_invalid")
-    result = mapping(results[0], {"category_flags"})
-    flags = result["category_flags"]
-    if type(flags) is not dict or len(flags) != 42:
-        _fail("stream_invalid")
-    if any(type(key) is not str or not key.strip() or len(key.encode("utf-8")) > 128 or value is not False
-           for key, value in flags.items()):
-        _fail("stream_invalid")
 
 
 def _sparse_terminal(response, items_added, items_done, item_ids, slot_phases,
@@ -309,29 +281,9 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
         provenance.clear()
     if type(model) is not str or not model or type(system) is not str or type(prompt) is not str or type(effort) is not str or effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
         _fail("invalid_request")
-    graphics_route = regulation_graphics_model_policy is not None
-    if graphics_route:
-        from .regulation_graphics_route import validate_regulation_graphics_route
-        try:
-            validate_regulation_graphics_route(model_policy=regulation_graphics_model_policy,
-                model=model, effort=effort, document_inputs=document_inputs,
-                max_tokens=max_tokens, temperature=temperature, max_call_seconds=max_call_seconds)
-        except ValueError:
-            _fail('invalid_request')
-    elif any(value is not None for value in (max_tokens, temperature, max_call_seconds)):
-        _fail('invalid_request')
+    if any(value is not None for value in (document_inputs, regulation_graphics_model_policy, max_tokens, temperature, max_call_seconds)):
+        _fail("invalid_request")
     content = prompt
-    document_metadata = None
-    if document_inputs is not None:
-        if not graphics_route and model != "gpt-6-luna":
-            _fail("invalid_request")
-        from .plan_document_inputs import document_input_content, document_input_metadata
-        try:
-            blocks = document_input_content(document_inputs)
-            document_metadata = document_input_metadata(document_inputs)
-        except ValueError:
-            _fail("invalid_request")
-        content = [{"type": "input_text", "text": prompt}, *blocks]
     completed = None
     text = None
     deltas, done = {}, {}
@@ -458,13 +410,13 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
                         if slot in parts_done:
                             _fail("stream_invalid")
                         parts_done[slot] = part
-                elif kind not in _PASSIVE_EVENTS:
-                    _fail("stream_invalid")
                 else:
+                    if event.get("error") is not None:
+                        _fail(_error_code(event["error"]))
                     if kind.startswith("response.reasoning"):
                         index = event.get("output_index")
                         sparse_lifecycle_valid &= type(index) is int and index in items_added and index not in items_done and items_added[index].get("type") == "reasoning" and event.get("item_id") == items_added[index].get("id")
-                    if type(response) is dict and response.get("status") not in {"queued", "in_progress"}:
+                    if type(response) is dict and response.get("status") not in {None, "queued", "in_progress"}:
                         _fail("stream_invalid")
     except ChatGPTPlanTransportError:
         raise
@@ -485,9 +437,6 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
         raise ChatGPTPlanTransportError("stream_interrupted") from None
     if completed is None:
         _fail("stream_incomplete")
-    if graphics_route and (completed.get('model') != model
-            or type(completed.get('id')) is not str or not completed['id'].strip()):
-        _fail('stream_invalid')
     if provenance is not None:
         def public(name):
             value = completed.get(name)
@@ -495,8 +444,4 @@ def stream_plan_response(client, *, model, system, prompt, effort, provenance=No
         revision = public("model_revision")
         provenance.update(configured_model=model, returned_model=public("model"), returned_revision=revision,
             identity_status="pinned" if revision else "unpinned", response_id=public("id"), reasoning_effort=effort)
-        if document_metadata is not None:
-            provenance["document_inputs"] = document_metadata
-        if graphics_route:
-            provenance['regulation_graphics_model_policy'] = regulation_graphics_model_policy
     return text

@@ -76,6 +76,39 @@ def _availability_timestamp(value: object, *, date_only: bool, field: str) -> da
     return parsed.astimezone(timezone.utc)
 
 
+def earnings_calendar_observed_at(report_date: object, hour: object = None) -> datetime:
+    """Resolve a causal UTC observation timestamp for an earnings calendar release.
+
+    - ``"bmo"``: XNYS session open on ``report_date`` (or 09:30 ET on non-sessions).
+    - ``"amc"`` / ``"dmh"`` / unknown: conservative XNYS session close on
+      ``report_date`` (or 16:00 ET on non-sessions), never backdating release.
+    """
+    from tradingagents.strategies.orchestration.trading_calendar import (
+        _ET,
+        is_session,
+        session_close,
+        session_open,
+    )
+
+    if isinstance(report_date, date) and not isinstance(report_date, datetime):
+        day = report_date
+    elif isinstance(report_date, str):
+        stripped = report_date.strip()
+        day = date.fromisoformat(stripped)
+        if stripped != day.isoformat():
+            raise ValueError("invalid earnings report_date")
+    else:
+        raise ValueError("invalid earnings report_date")
+
+    code = str(hour or "").strip().lower()
+    if is_session(day):
+        if code == "bmo":
+            return session_open(day).astimezone(timezone.utc)
+        return session_close(day).astimezone(timezone.utc)
+    local_time = time(9, 30) if code == "bmo" else time(16, 0)
+    return datetime.combine(day, local_time, tzinfo=_ET).astimezone(timezone.utc)
+
+
 def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datetime:
     """Resolve when source evidence became available without using economic dates."""
     if strategy == 'regulatory_pipeline' and metadata.get('regulation_publication_policy') == 'linked_publications_v1':
@@ -96,6 +129,10 @@ def canonical_observation_time(strategy: str, metadata: dict[str, Any]) -> datet
                     metadata[field], date_only=date_only, field=field
                 )
             )
+    if strategy == "earnings_call" and metadata.get("report_date") not in (None, ""):
+        values.append(
+            earnings_calendar_observed_at(metadata["report_date"], metadata.get("hour"))
+        )
     if not values:
         raise ValueError(f"{strategy} candidate lacks recognized observation time")
     return max(values)
@@ -171,39 +208,6 @@ def canonical_event_key(
             "year": _required(metadata, "year", strategy),
             "quarter": _required(metadata, "quarter", strategy),
         }
-    elif strategy == "insider_activity":
-        family = "form4_cluster"
-        filing_keys = metadata.get("filing_keys")
-        if _present(filing_keys):
-            if not isinstance(filing_keys, list):
-                raise ValueError("insider_activity candidate lacks source identity")
-            identities = sorted(str(item) for item in filing_keys)
-        else:
-            filings = _required(metadata, "filings", strategy)
-            if not isinstance(filings, list):
-                raise ValueError(
-                    "insider_activity candidate lacks source identity filings"
-                )
-            identities = sorted(
-                (_insider_filing_key(filing) for filing in filings), key=str
-            )
-        payload = {
-            "cluster_type": _required(metadata, "cluster_type", strategy),
-            "filings": identities,
-        }
-    elif strategy == "filing_analysis":
-        family = "sec_filing"
-        locator = metadata.get("accession_number") or metadata.get("file_url")
-        if not _present(locator):
-            locator = {
-                "entity_name": _required(metadata, "entity_name", strategy),
-                "form_type": _required(metadata, "form_type", strategy),
-                "file_date": _required(metadata, "file_date", strategy),
-            }
-        payload = {"locator": locator}
-    elif strategy == "regulatory_pipeline":
-        family = "regulations_document"
-        payload = _required(metadata, "document_id", strategy)
     elif strategy == "supply_chain":
         family = "news_article"
         locator = metadata.get("article_id") or metadata.get("url")
@@ -214,28 +218,6 @@ def canonical_event_key(
                 "published_at": _required(metadata, "published_at", strategy),
             }
         payload = locator
-    elif strategy == "litigation":
-        family = "legal_matter"
-        locator = metadata.get("docket_id") or metadata.get("url")
-        if not _present(locator):
-            locator = {
-                "release_date": _required(metadata, "release_date", strategy),
-                "title": _required(metadata, "title", strategy),
-            }
-        payload = locator
-    elif strategy == "congressional_trades":
-        trade_keys = _required(metadata, "trade_keys", strategy)
-        if not isinstance(trade_keys, list):
-            raise ValueError("congressional_trades candidate lacks source identity")
-        from tradingagents.strategies.modules.congressional_trades import (
-            congressional_cluster_event_key,
-        )
-
-        return congressional_cluster_event_key(
-            ticker,
-            str(_required(metadata, "cluster_direction", strategy)),
-            [str(item) for item in trade_keys],
-        )
     elif strategy == "govt_contracts":
         source = _required(metadata, "source", strategy)
         if source == "usaspending":
@@ -249,27 +231,6 @@ def canonical_event_key(
             }
         else:
             raise ValueError("govt_contracts candidate lacks source identity")
-    elif strategy == "state_economics":
-        if metadata.get('state_economics_policy') == 'state_unemployment_v1':
-            from ..data_sources.state_economics_policy import SERIES, day
-            event = _required(metadata, 'state_event', strategy)
-            if not isinstance(event, dict) or event.get('series_id') != SERIES.get(event.get('state')):
-                raise ValueError('invalid state source event identity')
-            period, vintage = day(event.get('observation_date')), day(event.get('vintage_date'))
-            native = f'fred:{event["series_id"]}:{period.isoformat()}:{vintage.isoformat()}'
-            if period.day != 1 or event.get('source_observation_id') != native:
-                raise ValueError('invalid state source event identity')
-            family, payload = 'fred_state_unemployment_vintage', native
-        else:
-            family = "state_economics_observation_window"
-            payload = {
-                "source_observation_ids": sorted(
-                    str(item)
-                    for item in _required(metadata, "source_observation_ids", strategy)
-                ),
-                "window_end": _required(metadata, "window_end", strategy),
-                "regional_sector": _required(metadata, "regional_sector", strategy),
-            }
     elif strategy == "weather_ag":
         family = "weather_observation_window"
         payload = {
@@ -287,16 +248,6 @@ def canonical_event_key(
             "window_end": _required(metadata, "window_end", strategy),
             "commodity": _required(metadata, "commodity", strategy),
         }
-    elif strategy == "quantum_readiness":
-        source_ids = metadata.get("source_ids")
-        if _present(source_ids):
-            if not isinstance(source_ids, list):
-                raise ValueError("quantum_readiness candidate lacks source identity")
-            family = "quantum_source_set"
-            payload = sorted(str(item) for item in source_ids)
-        else:
-            family = "quantum_observation_window"
-            payload = _required(metadata, "source_observation_window_id", strategy)
     else:
         raise ValueError(f"{strategy} candidate lacks a source identity family")
 

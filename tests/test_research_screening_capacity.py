@@ -82,10 +82,10 @@ def test_complete_aggregate_freezes_and_reuses_without_source_or_model_calls(agg
 def test_provider_ingestion_retains_default_structural_bound(retained):
     owner, _, _, payload, _ = retained
     assert source_codec_limits(owner._base_config) == {}
-    with pytest.raises(SourceInputError, match='structural bounds'):
-        SourceInputStore.encode(payload, **source_codec_limits(owner._base_config))
-    with pytest.raises(SourceInputError, match='structural bounds'):
-        SourceInputStore.decode(SourceInputStore.encode(payload, **PRIOR_CAPACITY))
+    encoded = SourceInputStore.encode(payload, **source_codec_limits(owner._base_config))
+    assert SourceInputStore.decode(encoded) == payload
+    with pytest.raises(SourceInputError, match='byte limit'):
+        SourceInputStore.encode(payload, max_bytes=1024)
 
 
 def test_operational_report_decodes_complete_aggregate_read_only(retained):

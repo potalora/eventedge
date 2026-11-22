@@ -111,56 +111,13 @@ class TestStateManager:
 
         return StateManager(str(tmp_path / "state"))
 
-    def test_save_load_generation(self, state):
-        results = {"scores": {"a": 1.5}, "gen": 1}
-        state.save_generation(1, results)
-        loaded = state.load_generation(1)
-        assert loaded["scores"]["a"] == 1.5
-
-    def test_get_latest_generation(self, state):
-        assert state.get_latest_generation() == 0
-        state.save_generation(1, {"gen": 1})
-        state.save_generation(2, {"gen": 2})
-        assert state.get_latest_generation() == 2
-
-    def test_paper_trades(self, state):
-        state.save_paper_trade({"strategy": "vix", "ticker": "SPY"})
-        state.save_paper_trade({"strategy": "pead", "ticker": "AAPL"})
-
-        all_trades = state.load_paper_trades()
-        assert len(all_trades) == 2
-
-        vix_trades = state.load_paper_trades(strategy="vix")
-        assert len(vix_trades) == 1
-        assert vix_trades[0]["ticker"] == "SPY"
-        assert "trade_id" in vix_trades[0]
-
-    def test_update_paper_trade(self, state):
-        state.save_paper_trade({"strategy": "test", "ticker": "SPY"})
-        trades = state.load_paper_trades()
-        trade_id = trades[0]["trade_id"]
-
-        state.update_paper_trade(trade_id, {"status": "closed", "pnl": 50.0})
-        updated = state.load_paper_trades()
-        assert updated[0]["status"] == "closed"
-        assert updated[0]["pnl"] == 50.0
-
-    def test_leaderboard(self, state):
-        lb = [{"name": "strat_a", "score": 1.5}]
-        state.save_leaderboard(lb)
-        loaded = state.load_leaderboard()
-        assert loaded[0]["name"] == "strat_a"
-
-    def test_reflections(self, state):
-        state.save_reflection(1, {"summary": "gen 1 went well"})
-        reflections = state.load_reflections()
-        assert len(reflections) == 1
-        assert reflections[0]["generation"] == 1
-
-    def test_reset(self, state):
-        state.save_paper_trade({"strategy": "test", "ticker": "SPY"})
-        state.reset()
+    def test_regime_snapshots_and_reset(self, state):
+        assert state.load_latest_regime() is None
+        state.save_regime_snapshot({"overall_regime": "normal"})
+        assert state.load_latest_regime()["overall_regime"] == "normal"
         assert state.load_paper_trades() == []
+        state.reset()
+        assert state.load_regime_history() == []
 
 
 # ---------------------------------------------------------------------------
@@ -247,10 +204,10 @@ class TestMultiStrategyEngine:
         )
 
     def test_engine_has_paper_trade_strategies(self, engine):
-        assert len(engine.paper_trade_strategies) == 12
+        assert len(engine.paper_trade_strategies) == 5
         names = {s.name for s in engine.paper_trade_strategies}
         assert "earnings_call" in names
-        assert "insider_activity" in names
+        assert "govt_contracts" in names
 
     def test_engine_build_regime_model(self, engine):
         data = {
@@ -281,180 +238,24 @@ class TestMultiStrategyEngine:
         engine.registry = MagicMock()
         engine.registry.get.return_value = source
 
+        from tradingagents.strategies.modules.supply_chain import (
+            get_supply_chain_universe,
+        )
+
+        expected_universe = list(get_supply_chain_universe(engine.ar_config))
         result = engine._fetch_finnhub_data("2026-07-30")
 
         source.fetch_supply_chains.assert_called_once_with(
-            ["AAPL", "TSLA", "NVDA", "AMZN", "BA", "CAT", "DE"],
+            expected_universe,
             deadline=42.0,
         )
         assert all(
             call.kwargs["deadline"] == 42.0
             for call in source.fetch_company_news.call_args_list
         )
-        assert len(result["disruption_news"]) == 7
+        assert len(result["disruption_news"]) == len(expected_universe)
         assert "transcripts" not in result
         assert "supply_chains" not in result
-
-
-# ---------------------------------------------------------------------------
-# New state manager tests (Layer 1 extensions)
-# ---------------------------------------------------------------------------
-
-
-class TestPlaybookState:
-    @pytest.fixture
-    def state(self, tmp_path):
-        from tradingagents.strategies.state.state import StateManager
-
-        return StateManager(str(tmp_path / "state"))
-
-    def test_save_load_playbook(self, state):
-        playbook = {"strategies": ["vix", "pead"], "version": 2}
-        state.save_playbook(playbook)
-        loaded = state.load_playbook()
-        assert loaded == playbook
-
-    def test_load_playbook_default_none(self, state):
-        assert state.load_playbook() is None
-
-
-class TestVintageState:
-    @pytest.fixture
-    def state(self, tmp_path):
-        from tradingagents.strategies.state.state import StateManager
-
-        return StateManager(str(tmp_path / "state"))
-
-    def test_save_load_vintage(self, state):
-        state.save_vintage({"strategy": "vix", "params": {"threshold": 30}})
-        vintages = state.load_vintages()
-        assert len(vintages) == 1
-        assert "vintage_id" in vintages[0]
-        assert "created_at" in vintages[0]
-        assert vintages[0]["strategy"] == "vix"
-
-    def test_load_vintages_filter_by_strategy(self, state):
-        state.save_vintage({"strategy": "vix", "params": {"threshold": 30}})
-        state.save_vintage({"strategy": "pead", "params": {"window": 5}})
-        state.save_vintage({"strategy": "vix", "params": {"threshold": 25}})
-
-        vix_vintages = state.load_vintages(strategy="vix")
-        assert len(vix_vintages) == 2
-        assert all(v["strategy"] == "vix" for v in vix_vintages)
-
-        pead_vintages = state.load_vintages(strategy="pead")
-        assert len(pead_vintages) == 1
-
-    def test_update_vintage(self, state):
-        state.save_vintage({"strategy": "vix", "completed_trade_count": 0})
-        vintages = state.load_vintages()
-        vid = vintages[0]["vintage_id"]
-
-        state.update_vintage(vid, {"completed_trade_count": 5, "status": "active"})
-        updated = state.load_vintages()
-        assert updated[0]["completed_trade_count"] == 5
-        assert updated[0]["status"] == "active"
-
-
-# ---------------------------------------------------------------------------
-# Vintage-aware paper trading tests (Layer 2b)
-# ---------------------------------------------------------------------------
-
-
-class TestVintageTracking:
-    def test_open_trade_with_vintage(self, tmp_path):
-        """PaperTrader cannot create legacy vintage trades."""
-        from tradingagents.strategies.state.state import StateManager
-        from tradingagents.strategies.trading.paper_trader import PaperTrader
-
-        state = StateManager(str(tmp_path))
-        trader = PaperTrader(state)
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.open_trade(
-                strategy="test_strat",
-                ticker="AAPL",
-                direction="long",
-                entry_price=150.0,
-                entry_date="2024-01-01",
-                vintage_id="v-001",
-                is_exploration=True,
-            )
-
-    def test_vintage_performance_no_trades(self, tmp_path):
-        """Vintage with no completed trades returns zero metrics."""
-        from tradingagents.strategies.state.state import StateManager
-        from tradingagents.strategies.trading.paper_trader import PaperTrader
-
-        state = StateManager(str(tmp_path))
-        trader = PaperTrader(state)
-        perf = trader.get_vintage_performance("nonexistent")
-        assert perf["num_completed"] == 0
-        assert perf["sharpe"] == 0.0
-
-    def test_vintage_performance_with_trades(self, tmp_path):
-        """Vintage with completed trades returns correct metrics."""
-        from tradingagents.strategies.state.state import StateManager
-        from tradingagents.strategies.trading.paper_trader import PaperTrader
-
-        state = StateManager(str(tmp_path))
-        trader = PaperTrader(state)
-        for ticker, entry, exit_price in (
-            ("AAPL", 100.0, 110.0),
-            ("MSFT", 200.0, 190.0),
-        ):
-            state.save_paper_trade(
-                {
-                    "strategy": "s",
-                    "ticker": ticker,
-                    "direction": "long",
-                    "entry_price": entry,
-                    "exit_price": exit_price,
-                    "entry_date": "2024-01-01",
-                    "exit_date": "2024-02-01",
-                    "status": "closed",
-                    "vintage_id": "v-001",
-                    "pnl_pct": (exit_price - entry) / entry,
-                }
-            )
-
-        perf = trader.get_vintage_performance("v-001")
-        assert perf["num_completed"] == 2
-        assert perf["win_rate"] == 0.5  # 1 win, 1 loss
-
-    def test_strategy_vintage_summary(self, tmp_path):
-        """Strategy summary returns per-vintage breakdown."""
-        from tradingagents.strategies.state.state import StateManager
-        from tradingagents.strategies.trading.paper_trader import PaperTrader
-
-        state = StateManager(str(tmp_path))
-        trader = PaperTrader(state)
-        state.save_paper_trade(
-            {
-                "strategy": "s",
-                "ticker": "AAPL",
-                "direction": "long",
-                "entry_price": 100.0,
-                "entry_date": "2024-01-01",
-                "status": "open",
-                "vintage_id": "v-001",
-            }
-        )
-        state.save_paper_trade(
-            {
-                "strategy": "s",
-                "ticker": "MSFT",
-                "direction": "long",
-                "entry_price": 200.0,
-                "entry_date": "2024-01-01",
-                "status": "open",
-                "vintage_id": "v-002",
-                "is_exploration": True,
-            }
-        )
-        summary = trader.get_strategy_vintage_summary("s")
-        assert len(summary) == 2
-        vintages = {s["vintage_id"] for s in summary}
-        assert vintages == {"v-001", "v-002"}
 
 
 class TestPortfolioCommittee:
@@ -620,32 +421,20 @@ class TestPortfolioCommittee:
 class TestTwoPhaseEngine:
     """Integration tests for the two-phase architecture."""
 
-    def test_learning_loop_is_disabled_without_reading_history(self):
-        """Production learning refuses before reading history or writing state."""
+    def test_dead_learning_methods_removed(self):
+        """Dead learning loop & adaptive confidence methods are deleted in gen_003."""
         from tradingagents.strategies.orchestration.multi_strategy_engine import (
             MultiStrategyEngine,
         )
-        from tradingagents.strategies.state.state import StateManager
-        from tradingagents.strategies.modules import get_all_strategies
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            state = StateManager(tmpdir)
-            config = {
-                "autoresearch": {
-                    "state_dir": tmpdir,
-                    "total_capital": 5000,
-                    "paper_trade": {"min_trades_for_evaluation": 20},
-                }
-            }
-            engine = MultiStrategyEngine(
-                config=config, strategies=get_all_strategies(), state_manager=state
-            )
-            state.load_paper_trades = lambda **_kwargs: (_ for _ in ()).throw(
-                AssertionError("learning triggers must not read legacy paper trades")
-            )
-
-            with pytest.raises(RuntimeError, match="production learning is disabled"):
-                engine.run_learning_loop()
+        for method_name in (
+            "run_learning_loop",
+            "_compute_strategy_confidence",
+            "_read_strategy_outcomes",
+            "_should_trigger_learning_loop",
+            "set_cycle_tracker",
+        ):
+            assert not hasattr(MultiStrategyEngine, method_name)
 
 
 # ---------------------------------------------------------------------------
@@ -711,121 +500,6 @@ class TestSignalJournal:
             aapl = journal.get_entries(ticker="AAPL")
             assert len(aapl) == 2
 
-    def test_convergence_detection(self):
-        from tradingagents.strategies.learning.signal_journal import (
-            JournalEntry,
-            SignalJournal,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            journal = SignalJournal(tmpdir)
-
-            # 3 strategies agree on AAPL long
-            for strat in ["earnings_call", "supply_chain", "insider_activity"]:
-                journal.log_signal(
-                    JournalEntry(
-                        timestamp="2026-03-30",
-                        strategy=strat,
-                        ticker="AAPL",
-                        direction="long",
-                        score=0.7,
-                        traded=True,
-                        entry_price=175.0,
-                    )
-                )
-
-            # Only 1 strategy on GOOGL
-            journal.log_signal(
-                JournalEntry(
-                    timestamp="2026-03-30",
-                    strategy="filing_analysis",
-                    ticker="GOOGL",
-                    direction="short",
-                    score=0.5,
-                    traded=False,
-                    entry_price=140.0,
-                )
-            )
-
-            convergence = journal.get_convergence_signals(
-                "2026-03-30", min_strategies=2
-            )
-            assert len(convergence) == 1
-            assert convergence[0]["ticker"] == "AAPL"
-            assert convergence[0]["count"] == 3
-
-    def test_convergence_empty_journal(self):
-        from tradingagents.strategies.learning.signal_journal import SignalJournal
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            journal = SignalJournal(tmpdir)
-            assert journal.get_convergence_signals("2026-03-30") == []
-
-    def test_fill_outcomes(self):
-        from tradingagents.strategies.learning.signal_journal import (
-            JournalEntry,
-            SignalJournal,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            journal = SignalJournal(tmpdir)
-
-            # Log a signal from 10 days ago
-            journal.log_signal(
-                JournalEntry(
-                    timestamp="2026-03-20",
-                    strategy="earnings_call",
-                    ticker="AAPL",
-                    direction="long",
-                    score=0.7,
-                    traded=True,
-                    entry_price=170.0,
-                )
-            )
-
-            # Mock price cache: AAPL now at 180
-            mock_prices = pd.DataFrame({"Close": [180.0]})
-            price_cache = {"AAPL": mock_prices}
-
-            updated = journal.fill_outcomes(price_cache, "2026-03-30")
-            assert updated == 1
-
-            entries = journal.get_entries()
-            assert entries[0]["return_5d"] is not None
-            assert entries[0]["return_10d"] is not None
-            # 30d not yet elapsed
-            assert entries[0]["return_30d"] is None
-
-            # Return should be (180 - 170) / 170 ≈ 0.0588
-            assert abs(entries[0]["return_5d"] - 0.058824) < 0.001
-
-    def test_fill_outcomes_no_update_when_recent(self):
-        from tradingagents.strategies.learning.signal_journal import (
-            JournalEntry,
-            SignalJournal,
-        )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            journal = SignalJournal(tmpdir)
-
-            # Signal from 2 days ago — too recent for any outcome
-            journal.log_signal(
-                JournalEntry(
-                    timestamp="2026-03-28",
-                    strategy="earnings_call",
-                    ticker="AAPL",
-                    direction="long",
-                    score=0.7,
-                    traded=True,
-                    entry_price=170.0,
-                )
-            )
-
-            mock_prices = pd.DataFrame({"Close": [180.0]})
-            updated = journal.fill_outcomes({"AAPL": mock_prices}, "2026-03-30")
-            assert updated == 0
-
-
 class TestLLMAnalyzerRegime:
     """Test regime context integration in LLM analyzer."""
 
@@ -872,153 +546,8 @@ class TestLLMAnalyzerPrompts:
         analyzer = LLMAnalyzer()
         assert analyzer.get_prompt("nonexistent") == ""
 
-    def test_set_and_get_override(self):
-        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-
-        analyzer = LLMAnalyzer()
-        original = analyzer.get_prompt("litigation")
-        analyzer.set_prompt_override("litigation", "Custom prompt for testing")
-        assert analyzer.get_prompt("litigation") == "Custom prompt for testing"
-
-        # Revert
-        analyzer.set_prompt_override("litigation", "")
-        assert analyzer.get_prompt("litigation") == original
-
-
-# ---------------------------------------------------------------------------
-# Prompt optimizer tests
-# ---------------------------------------------------------------------------
-
-
-class TestPromptOptimizer:
-    @pytest.fixture
-    def optimizer_setup(self, tmp_path):
-        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-        from tradingagents.strategies.learning.prompt_optimizer import PromptOptimizer
-
-        analyzer = LLMAnalyzer()
-        optimizer = PromptOptimizer(str(tmp_path), analyzer)
-        return optimizer, analyzer, tmp_path
-
-    def test_evaluate_prompts_insufficient_data(self, optimizer_setup):
-        """With no v2 outcomes, all strategies disclose no score."""
-        optimizer, _, _ = optimizer_setup
-        scores = optimizer.evaluate_prompts({})
-
-        for strategy, score in scores.items():
-            assert score["n_signals"] == 0
-            assert score["hit_rate"] is None
-            assert score["avg_return"] is None
-            assert score["calibration"] is None
-
-    def test_identify_worst_prompt_no_data(self, optimizer_setup):
-        """With no eligible strategies, should return None."""
-        optimizer, _, _ = optimizer_setup
-        scores = {
-            "earnings_call": {"hit_rate": 0.0, "n_signals": 5},
-            "litigation": {"hit_rate": 0.0, "n_signals": 3},
-        }
-        assert optimizer.identify_worst_prompt(scores) is None
-
-    def test_identify_worst_prompt_with_data(self, optimizer_setup):
-        optimizer, _, _ = optimizer_setup
-        scores = {
-            "earnings_call": {"hit_rate": 0.7, "n_signals": 25},
-            "litigation": {"hit_rate": 0.4, "n_signals": 25},
-            "supply_chain": {"hit_rate": 0.6, "n_signals": 25},
-        }
-        assert optimizer.identify_worst_prompt(scores) == "litigation"
-
-    def test_start_trial_creates_files(self, optimizer_setup):
-        optimizer, analyzer, tmp_path = optimizer_setup
-        trial_id = optimizer.start_trial("litigation", "New test prompt")
-
-        assert trial_id.startswith("litigation_")
-        assert (tmp_path / "prompts" / "litigation_trial.txt").exists()
-        assert (tmp_path / "prompts" / "litigation_baseline.txt").exists()
-        assert analyzer.get_prompt("litigation") == "New test prompt"
-
-    def test_get_active_trial(self, optimizer_setup):
-        optimizer, _, _ = optimizer_setup
-        assert optimizer.get_active_trial() == (None, None)
-
-        optimizer.start_trial("litigation", "New test prompt")
-        trial_id, trial = optimizer.get_active_trial()
-        assert trial_id is not None
-        assert trial["strategy"] == "litigation"
-        assert trial["status"] == "active"
-
-    def test_commit_revert_restores_baseline(self, optimizer_setup):
-        optimizer, analyzer, _ = optimizer_setup
-        original = analyzer.get_prompt("litigation")
-        trial_id = optimizer.start_trial("litigation", "Modified prompt")
-        assert analyzer.get_prompt("litigation") == "Modified prompt"
-
-        optimizer.commit_or_revert(trial_id, "revert")
-        assert analyzer.get_prompt("litigation") == original
-
-    def test_prompt_version_hash(self, optimizer_setup):
-        optimizer, _, _ = optimizer_setup
-        v1 = optimizer.get_prompt_version("earnings_call")
-        assert len(v1) == 12
-        # Same prompt -> same hash
-        v2 = optimizer.get_prompt_version("earnings_call")
-        assert v1 == v2
-
-
-# ---------------------------------------------------------------------------
-# Signal journal high-conviction failures test
-# ---------------------------------------------------------------------------
-
 
 class TestSignalJournalFailures:
-    def test_get_high_conviction_failures(self, tmp_path):
-        from tradingagents.strategies.learning.signal_journal import (
-            JournalEntry,
-            SignalJournal,
-        )
-
-        journal = SignalJournal(str(tmp_path))
-
-        # Log some signals with outcomes
-        entries = [
-            JournalEntry(
-                timestamp="2024-06-01",
-                strategy="litigation",
-                ticker="AAPL",
-                direction="short",
-                score=0.8,
-                llm_conviction=0.9,
-                entry_price=100.0,
-                return_5d=-0.05,  # Direction-signed loss on the short
-            ),
-            JournalEntry(
-                timestamp="2024-06-02",
-                strategy="litigation",
-                ticker="MSFT",
-                direction="short",
-                score=0.7,
-                llm_conviction=0.8,
-                entry_price=200.0,
-                return_5d=0.03,  # Direction-signed profit on the short
-            ),
-            JournalEntry(
-                timestamp="2024-06-03",
-                strategy="litigation",
-                ticker="GOOGL",
-                direction="short",
-                score=0.6,
-                llm_conviction=0.3,
-                entry_price=150.0,
-                return_5d=-0.02,  # Direction-signed loss, but low conviction
-            ),
-        ]
-        journal.log_signals(entries)
-
-        failures = journal.get_high_conviction_failures("litigation")
-        assert len(failures) == 1
-        assert failures[0]["ticker"] == "AAPL"
-
     def test_prompt_version_field_in_journal(self, tmp_path):
         from tradingagents.strategies.learning.signal_journal import (
             JournalEntry,
@@ -1039,205 +568,6 @@ class TestSignalJournalFailures:
         entries = journal.get_entries()
         assert len(entries) == 1
         assert entries[0]["prompt_version"] == "abc123def456"
-
-
-# ---------------------------------------------------------------------------
-# Strategy confidence tests
-# ---------------------------------------------------------------------------
-
-
-class TestStrategyConfidence:
-    """Test v2 OutcomeRecord-derived strategy confidence."""
-
-    @staticmethod
-    def _outcomes(count, hits, strategy="earnings_call"):
-        from datetime import date
-        from decimal import Decimal
-
-        from tradingagents.strategies.metrics.models import OutcomeRecord
-
-        return tuple(
-            OutcomeRecord(
-                outcome_id=f"outcome-{index}",
-                signal_id=f"signal-{index}",
-                event_key=f"event-{index}",
-                epoch_id="epoch-1",
-                strategy=strategy,
-                policy_id="policy-1",
-                ticker="AAPL",
-                direction="long",
-                holding_sessions=5,
-                entry_session=date(2026, 1, 2),
-                exit_session=date(2026, 1, 12),
-                entry_price=Decimal("100"),
-                exit_price=Decimal("101" if index < hits else "99"),
-                raw_return=Decimal("0.01" if index < hits else "-0.01"),
-                signed_return=Decimal("0.01" if index < hits else "-0.01"),
-                status="valid",
-                invalid_reason="",
-            )
-            for index in range(count)
-        )
-
-    def test_insufficient_data_returns_neutral(self, tmp_path):
-        """With < 10 outcomes, confidence = 0.5."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import (
-            MultiStrategyEngine,
-        )
-        from tradingagents.strategies.modules import get_paper_trade_strategies
-
-        engine = MultiStrategyEngine(
-            config={"autoresearch": {"state_dir": str(tmp_path)}},
-            strategies=get_paper_trade_strategies(),
-            outcome_reader=lambda _strategy: self._outcomes(9, 9),
-        )
-        assert engine._compute_strategy_confidence("earnings_call") == 0.5
-
-    def test_all_hits_returns_high_confidence(self, tmp_path):
-        """100% hit rate -> 0.9 confidence (capped)."""
-        from dataclasses import replace
-        from decimal import Decimal
-
-        from tradingagents.strategies.orchestration.multi_strategy_engine import (
-            MultiStrategyEngine,
-        )
-        from tradingagents.strategies.modules import get_paper_trade_strategies
-
-        five_session = self._outcomes(15, 15)
-        other_horizons = tuple(
-            replace(
-                row,
-                outcome_id=f"outcome-10-{index}",
-                holding_sessions=10,
-                exit_price=Decimal("99"),
-                raw_return=Decimal("-0.01"),
-                signed_return=Decimal("-0.01"),
-            )
-            for index, row in enumerate(five_session)
-        )
-        engine = MultiStrategyEngine(
-            config={"autoresearch": {"state_dir": str(tmp_path)}},
-            strategies=get_paper_trade_strategies(),
-            outcome_reader=lambda _strategy: iter(five_session + other_horizons),
-        )
-        conf = engine._compute_strategy_confidence("earnings_call")
-        assert conf == pytest.approx(0.9)
-
-    def test_all_misses_returns_low_confidence(self, tmp_path):
-        """0% hit rate -> 0.2 confidence (floored)."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import (
-            MultiStrategyEngine,
-        )
-        from tradingagents.strategies.modules import get_paper_trade_strategies
-
-        engine = MultiStrategyEngine(
-            config={"autoresearch": {"state_dir": str(tmp_path)}},
-            strategies=get_paper_trade_strategies(),
-            outcome_reader=lambda _strategy: self._outcomes(15, 0),
-        )
-        conf = engine._compute_strategy_confidence("earnings_call")
-        assert conf == pytest.approx(0.2)
-
-    def test_50pct_hit_rate_maps_correctly(self, tmp_path):
-        """50% hit rate -> should be about 0.55 confidence."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import (
-            MultiStrategyEngine,
-        )
-        from tradingagents.strategies.modules import get_paper_trade_strategies
-
-        engine = MultiStrategyEngine(
-            config={"autoresearch": {"state_dir": str(tmp_path)}},
-            strategies=get_paper_trade_strategies(),
-            outcome_reader=lambda _strategy: self._outcomes(20, 10),
-        )
-        conf = engine._compute_strategy_confidence("earnings_call")
-        # 50% hit rate: (0.5 - 0.3) / 0.4 * 0.7 + 0.2 = 0.55
-        assert conf == pytest.approx(0.55)
-
-    def test_adaptive_flag_is_rejected(self, tmp_path):
-        """Production engines cannot enable adaptive confidence."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import (
-            MultiStrategyEngine,
-        )
-        from tradingagents.strategies.modules import get_paper_trade_strategies
-
-        with pytest.raises(ValueError, match="production learning is disabled"):
-            MultiStrategyEngine(
-                config={"autoresearch": {"state_dir": str(tmp_path)}},
-                strategies=get_paper_trade_strategies(),
-                adaptive_confidence=True,
-            )
-
-    def test_non_adaptive_flag_uses_fixed(self, tmp_path):
-        """Engine with adaptive_confidence=False uses 0.5."""
-        from tradingagents.strategies.orchestration.multi_strategy_engine import (
-            MultiStrategyEngine,
-        )
-        from tradingagents.strategies.modules import get_paper_trade_strategies
-
-        engine = MultiStrategyEngine(
-            config={"autoresearch": {"state_dir": str(tmp_path)}},
-            strategies=get_paper_trade_strategies(),
-            adaptive_confidence=False,
-        )
-        assert engine._adaptive_confidence is False
-
-
-# ---------------------------------------------------------------------------
-# Risk gate position sizing tests (no weight parameter)
-# ---------------------------------------------------------------------------
-
-
-class TestRiskGateNoWeights:
-    """Test risk gate position sizing without weight scaling."""
-
-    @staticmethod
-    def _broker(capital=5000.0):
-        from tradingagents.execution.base_broker import AccountInfo
-
-        broker = MagicMock()
-        broker.get_account.return_value = AccountInfo(capital, capital, capital)
-        broker.get_positions.return_value = []
-        return broker
-
-    def test_basic_sizing(self):
-        """Position size from committee pct, no weight."""
-        from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
-
-        broker = self._broker()
-        gate = RiskGate(RiskGateConfig(), broker)
-        # 5% of $5000 = $250, at $50/share = 5 shares
-        shares = gate.compute_position_size(0.05, 50.0)
-        assert shares == 5
-
-    def test_caps_at_max_position_pct(self):
-        """Position capped at 15% of portfolio."""
-        from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
-
-        broker = self._broker()
-        gate = RiskGate(RiskGateConfig(), broker)
-        # 50% request should be capped at 15% = $750, at $50 = 15 shares
-        shares = gate.compute_position_size(0.50, 50.0)
-        assert shares == 15
-
-    def test_zero_price_returns_zero(self):
-        from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
-
-        broker = self._broker()
-        gate = RiskGate(RiskGateConfig(), broker)
-        assert gate.compute_position_size(0.05, 0.0) == 0
-
-    def test_min_position_enforced(self):
-        """Tiny positions below $100 min are rejected."""
-        from tradingagents.strategies.trading.risk_gate import RiskGate, RiskGateConfig
-
-        broker = self._broker()
-        config = RiskGateConfig(min_position_value=1000.0, max_position_pct=0.01)
-        gate = RiskGate(config, broker)
-        # 1% of $5000 = $50. Floor wants $1000 but max_position_pct cap = $50.
-        # Floor exceeds cap → rejected.
-        shares = gate.compute_position_size(0.01, 60.0)
-        assert shares == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1382,152 +712,4 @@ class TestCohortComparison:
         assert heatmap["1y"]["50k"] is None
 
 
-# ---------------------------------------------------------------------------
-# EDGAR data flow tests
-# ---------------------------------------------------------------------------
 
-
-class TestEdgarDataFlow:
-    """Test EDGAR data quality fixes: Form 4 prompt and prior filing text."""
-
-    def test_form4_prompt_includes_field_descriptions(self):
-        """LLM prompt for Form 4 analysis includes transaction_code explanations."""
-        from tradingagents.strategies.learning.llm_analyzer import LLMAnalyzer
-
-        analyzer = LLMAnalyzer()
-        # Mock _call_llm to capture the prompt
-        calls = []
-        analyzer._call_llm = lambda system, user, *, role: (
-            calls.append((system, user, role)),
-            '{"direction": "neutral"}',
-        )[1]
-        analyzer._regime_suffix = lambda ctx: ""
-
-        analyzer.analyze_insider_context(
-            [
-                {
-                    "transaction_type": "buy",
-                    "transaction_code": "P",
-                    "acquired_disposed": "A",
-                    "open_market": True,
-                    "shares": 1000,
-                    "price_per_share": 50.0,
-                    "owner_name": "Jane CEO",
-                    "is_officer": True,
-                }
-            ],
-            "AAPL",
-        )
-        assert len(calls) == 1
-        assert calls[0][2] == "bounded"
-        system_prompt = calls[0][0]
-        # Verify the prompt explains transaction codes
-        assert "transaction_code" in system_prompt
-        assert '"P" = open-market purchase' in system_prompt
-        assert '"A" = grant/award' in system_prompt
-        assert '"F" = tax withholding' in system_prompt
-        # Verify the filing data is in the user prompt
-        user_prompt = calls[0][1]
-        assert "Jane CEO" in user_prompt
-        assert "1000" in user_prompt
-
-    def test_event_monitor_fetches_prior_text(self):
-        """poll_edgar_filings fetches prior filing text for 10-K/10-Q."""
-        from tradingagents.strategies.learning.event_monitor import EventMonitor
-
-        mock_source = MagicMock()
-        mock_source.is_available.return_value = True
-        mock_source.search_filings.return_value = [
-            {
-                "form_type": "10-K",
-                "file_url": "https://sec.gov/current.htm",
-                "file_date": "2026-03-15",
-                "ticker": "AAPL",
-                "ciks": ["320193"],
-            }
-        ]
-        # Current filing text
-        mock_source.get_filing_text.side_effect = [
-            "<html>Current 10-K content</html>",
-            "<html>Prior 10-K content</html>",
-        ]
-        # Prior filing lookup
-        mock_source.get_company_filings.return_value = [
-            {
-                "filing_date": "2025-03-15",
-                "accession_number": "0001-23-456",
-                "primary_document": "prior.htm",
-            },
-        ]
-
-        registry = MagicMock()
-        registry.get.return_value = mock_source
-
-        monitor = EventMonitor(registry)
-        filings = monitor.poll_edgar_filings(
-            form_types=["10-K"],
-            days_back=7,
-            max_text_fetches=5,
-        )
-
-        assert len(filings) == 1
-        assert filings[0]["current_text"]
-        assert "Current 10-K content" in filings[0]["current_text"]
-        assert filings[0]["prior_text"]
-        assert "Prior 10-K content" in filings[0]["prior_text"]
-
-    def test_event_monitor_no_prior_when_no_cik(self):
-        """No prior text fetched when filing has no CIK."""
-        from tradingagents.strategies.learning.event_monitor import EventMonitor
-
-        mock_source = MagicMock()
-        mock_source.is_available.return_value = True
-        mock_source.search_filings.return_value = [
-            {
-                "form_type": "10-Q",
-                "file_url": "https://sec.gov/current.htm",
-                "file_date": "2026-03-15",
-                "ticker": "AAPL",
-                "ciks": [],  # No CIK
-            }
-        ]
-        mock_source.get_filing_text.return_value = "<html>Current content</html>"
-
-        registry = MagicMock()
-        registry.get.return_value = mock_source
-
-        monitor = EventMonitor(registry)
-        filings = monitor.poll_edgar_filings(form_types=["10-Q"], days_back=7)
-
-        assert len(filings) == 1
-        assert filings[0]["current_text"]
-        assert filings[0]["prior_text"] == ""
-        # Should NOT call get_company_filings
-        mock_source.get_company_filings.assert_not_called()
-
-    def test_event_monitor_proxy_no_prior_text(self):
-        """DEF 14A filings get proxy_text but no prior_text."""
-        from tradingagents.strategies.learning.event_monitor import EventMonitor
-
-        mock_source = MagicMock()
-        mock_source.is_available.return_value = True
-        mock_source.search_filings.return_value = [
-            {
-                "form_type": "DEF 14A",
-                "file_url": "https://sec.gov/proxy.htm",
-                "file_date": "2026-03-15",
-                "ticker": "AAPL",
-                "ciks": ["320193"],
-            }
-        ]
-        mock_source.get_filing_text.return_value = "<html>Proxy content</html>"
-
-        registry = MagicMock()
-        registry.get.return_value = mock_source
-
-        monitor = EventMonitor(registry)
-        filings = monitor.poll_edgar_filings(form_types=["DEF 14A"], days_back=7)
-
-        assert len(filings) == 1
-        assert "proxy_text" in filings[0]
-        assert "prior_text" not in filings[0]  # Only 10-K/10-Q get prior_text

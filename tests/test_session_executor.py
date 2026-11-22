@@ -807,24 +807,24 @@ def test_governed_resume_rejects_broken_record_before_persisted_phase(tmp_path, 
     with sqlite3.connect(db_path) as connection:
         if tamper == "delete":
             connection.execute(
-                "DELETE FROM governed_bar_recoveries WHERE recovery_id = ?",
+                "DELETE FROM bar_recoveries WHERE recovery_id = ?",
                 (record.recovery_id,),
             )
         elif tamper == "payload":
             connection.execute(
-                "UPDATE governed_bar_recoveries SET payload_json = payload_json || ' '",
+                "UPDATE bar_recoveries SET payload_json = payload_json || ' '",
             )
         elif tamper == "digest":
             connection.execute(
-                "UPDATE governed_bar_recoveries SET evidence_digest = 'sha256:changed'",
+                "UPDATE bar_recoveries SET evidence_digest = 'sha256:changed'",
             )
         elif tamper == "recovery_id":
             connection.execute(
-                "UPDATE governed_bar_recoveries SET recovery_id = 'changed-id'",
+                "UPDATE bar_recoveries SET recovery_id = 'changed-id'",
             )
         else:
             connection.execute(
-                "UPDATE governed_bar_recoveries SET contract_version = 'yfinance-60m-v0'",
+                "UPDATE bar_recoveries SET contract_version = 'yfinance-60m-v0'",
             )
     try:
         before = _replay_mutation_state(ledger, db_path, intent.intent_id)
@@ -849,7 +849,7 @@ def test_complete_governed_replay_record_deletion_is_read_only(tmp_path):
         before = _replay_mutation_state(ledger, store_path, intent.intent_id)
         with sqlite3.connect(store_path) as connection:
             connection.execute(
-                "DELETE FROM governed_bar_recoveries WHERE recovery_id = ?",
+                "DELETE FROM bar_recoveries WHERE recovery_id = ?",
                 (record.recovery_id,),
             )
 
@@ -2937,54 +2937,6 @@ def test_production_finnhub_supply_chain_normalization_stages_real_candidate(
     _stage_real_strategy_candidate(tmp_path, "supply_chain", {"finnhub": payload})
 
 
-def test_production_finnhub_quantum_normalization_stages_real_candidate(tmp_path):
-    payload, _ = _production_finnhub_payload(tmp_path)
-
-    assert payload["pqc_news"][0]["published_at"] == "2026-07-31T19:00:00+00:00"
-    _stage_real_strategy_candidate(tmp_path, "quantum_readiness", {"finnhub": payload})
-
-
-def test_production_congress_pub_date_normalization_stages_real_candidate(tmp_path):
-    from tradingagents.strategies.data_sources.congress_source import (
-        _normalize_fmp_trade,
-    )
-
-    normalized = _normalize_fmp_trade(
-        {
-            "symbol": "AAPL",
-            "assetDescription": "Apple Inc.",
-            "transactionDate": "2026-07-25",
-            "disclosureDate": "2026-07-30",
-            "type": "Purchase",
-            "amount": "$15,001 - $50,000",
-            "office": "Member One",
-            "link": "https://example.test/disclosure-1",
-        },
-        "house",
-    )
-
-    assert normalized["publication_date"] == normalized["pub_date"]
-    second = _normalize_fmp_trade(
-        {
-            "symbol": "AAPL",
-            "assetDescription": "Apple Inc.",
-            "transactionDate": "2026-07-25",
-            "disclosureDate": "2026-07-30",
-            "type": "Purchase",
-            "amount": "$15,001 - $50,000",
-            "office": "Member Two",
-            "link": "https://example.test/disclosure-2",
-        },
-        "house",
-    )
-    candidate, result = _stage_real_strategy_candidate(
-        tmp_path,
-        "congressional_trades",
-        {"congress": {"recent_trades": [normalized, second]}},
-    )
-    assert result["signals"][0]["event_key"] == candidate.event_key
-
-
 def test_production_usaspending_availability_stages_real_candidate(tmp_path):
     from tradingagents.strategies.data_sources.usaspending_source import (
         USASpendingSource,
@@ -3619,7 +3571,7 @@ def test_profile_bound_policy_stages_with_provenance_and_revalidates_at_fill(
 
         policy_changed = deepcopy(config)
         policy_changed["autoresearch"]["portfolio_policy"]["version"] = (
-            "portfolio_policy_v2"
+            "portfolio_policy_v3"
         )
         changed_engine = MultiStrategyEngine(
             config=policy_changed,

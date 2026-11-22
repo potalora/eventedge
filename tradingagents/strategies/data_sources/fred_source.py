@@ -184,8 +184,7 @@ class FREDSource:
         # the containing month when observation_start lies inside that month.
         # Use only declared frequencies; do not guess a frequency for arbitrary
         # caller-supplied series IDs (which may be quarterly or annual).
-        from .state_economics_policy import SERIES as STATE_SERIES
-        monthly = {'UNRATE', 'CPIAUCSL', 'PAYEMS', 'FEDFUNDS', 'PCOPPUSDM'} | set(STATE_SERIES.values())
+        monthly = {'UNRATE', 'CPIAUCSL', 'PAYEMS', 'FEDFUNDS', 'PCOPPUSDM'}
         daily = {'BAMLH0A0HYM2', 'BAMLC0A4CBBB', 'T10Y2Y', 'VIXCLS', 'DCOILWTICO'}
         lower = date.fromisoformat(start).replace(day=1).isoformat() if series_id in monthly else start if series_id in daily else None
         if any(row['observation_date'] > min(end, vintage)

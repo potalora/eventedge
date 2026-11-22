@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from datetime import date, datetime, timezone
@@ -266,7 +267,8 @@ def test_companion_provenance_conflict_and_tamper_fail_closed(tmp_path) -> None:
             )
 
         ledger.connection.execute(
-            "UPDATE intent_policy_provenance SET payload_json = ? WHERE intent_id = ?",
+            "UPDATE policy_audit_records SET payload_json = ? "
+            "WHERE record_type = 'intent_policy_provenance' AND record_id = ?",
             ('{"tampered":true}', intent.intent_id),
         )
         with pytest.raises(LedgerConflictError, match="tampered intent policy"):
@@ -291,37 +293,33 @@ def test_companion_reads_reject_coherently_rehashed_invalid_payloads_on_reopen(
     ledger = _ledger(tmp_path)
     try:
         _stage_policy_entry(ledger)
+        kind = artifact.split("_", 1)[0]
+        record_type = f"{kind}_policy_provenance"
+        identity = f"{kind}-1"
         if artifact in {"signal_empty_reasons", "intent_empty_reasons"}:
-            kind = artifact.split("_", 1)[0]
-            table = f"{kind}_policy_provenance"
-            identity_column = f"{kind}_id"
-            identity = f"{kind}-1"
             row = ledger.connection.execute(
-                f"SELECT payload_json FROM {table} WHERE {identity_column} = ?",
-                (identity,),
+                "SELECT payload_json FROM policy_audit_records "
+                "WHERE record_type = ? AND record_id = ?",
+                (record_type, identity),
             ).fetchone()
             payload = json.loads(str(row["payload_json"]))
             payload["reason_codes"] = []
             payload_json = json.dumps(
                 payload, sort_keys=True, separators=(",", ":")
             )
+            payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
             ledger.connection.execute(
-                f"""UPDATE {table}
-                   SET reason_codes_json = '[]', payload_json = ?, payload_digest = ?
-                   WHERE {identity_column} = ?""",
-                (
-                    payload_json,
-                    stable_id("policy_payload", kind, identity, payload_json),
-                    identity,
-                ),
+                """UPDATE policy_audit_records
+                   SET payload_json = ?, payload_sha256 = ?
+                   WHERE record_type = ? AND record_id = ?""",
+                (payload_json, payload_sha256, record_type, identity),
             )
         else:
-            kind = artifact.split("_", 1)[0]
             ledger.connection.execute(
-                f"""UPDATE {kind}_policy_provenance
-                   SET captured_at = '2026-07-31T20:00:00'
-                   WHERE {kind}_id = ?""",
-                (f"{kind}-1",),
+                """UPDATE policy_audit_records
+                   SET created_at = '2026-07-31T20:00:00'
+                   WHERE record_type = ? AND record_id = ?""",
+                (record_type, identity),
             )
     finally:
         ledger.close()
@@ -342,8 +340,8 @@ def test_noncanonical_companion_column_tamper_raises_ledger_conflict(tmp_path) -
     try:
         _stage_policy_entry(ledger)
         ledger.connection.execute(
-            "UPDATE intent_policy_provenance SET strategy_tags_json = '{' "
-            "WHERE intent_id = 'intent-1'"
+            "UPDATE policy_audit_records SET payload_json = '{' "
+            "WHERE record_type = 'intent_policy_provenance' AND record_id = 'intent-1'"
         )
 
         with pytest.raises(LedgerConflictError, match="tampered intent policy"):
@@ -356,9 +354,18 @@ def test_non_boolean_companion_flag_tamper_raises_ledger_conflict(tmp_path) -> N
     ledger = _ledger(tmp_path)
     try:
         _stage_policy_entry(ledger)
+        row = ledger.connection.execute(
+            "SELECT payload_json FROM policy_audit_records "
+            "WHERE record_type = 'intent_policy_provenance' AND record_id = 'intent-1'"
+        ).fetchone()
+        payload = json.loads(str(row["payload_json"]))
+        payload["order_eligible"] = 2
+        payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         ledger.connection.execute(
-            "UPDATE intent_policy_provenance SET order_eligible = 2 "
-            "WHERE intent_id = 'intent-1'"
+            "UPDATE policy_audit_records SET payload_json = ?, payload_sha256 = ? "
+            "WHERE record_type = 'intent_policy_provenance' AND record_id = 'intent-1'",
+            (payload_json, payload_sha256),
         )
 
         with pytest.raises(LedgerConflictError, match="tampered intent policy"):
@@ -402,7 +409,8 @@ def test_bound_policy_context_is_canonical_idempotent_and_tamper_evident(tmp_pat
             )
 
         ledger.connection.execute(
-            "UPDATE policy_session_contexts SET context_digest = 'bad' WHERE session = ?",
+            "UPDATE policy_audit_records SET payload_sha256 = 'bad' "
+            "WHERE record_type = 'policy_session_context' AND session = ?",
             (MONDAY.isoformat(),),
         )
         with pytest.raises(LedgerConflictError, match="tampered policy session context"):
@@ -480,7 +488,8 @@ def test_candidate_policy_decision_is_one_tamper_evident_multi_signal_unit(
 
     tamper = sqlite3.connect(path)
     tamper.execute(
-        "UPDATE policy_candidate_decisions SET approved_weight = '0.19'"
+        "UPDATE policy_audit_records SET payload_sha256 = 'bad' "
+        "WHERE record_type = 'policy_candidate_decision'"
     )
     tamper.commit()
     tamper.close()
@@ -523,22 +532,12 @@ def test_candidate_policy_decision_rejects_coherent_payload_rewrite(tmp_path) ->
             }
         )
         payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-        payload_digest = stable_id(
-            "policy_candidate_payload", decision["decision_id"], payload_json
-        )
+        payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
         ledger.connection.execute(
-            """UPDATE policy_candidate_decisions
-               SET approved_weight = ?, decision = ?, reason_codes_json = ?,
-                   payload_json = ?, payload_digest = ?
-               WHERE decision_id = ?""",
-            (
-                "0.1",
-                "trimmed",
-                '["position_cap"]',
-                payload_json,
-                payload_digest,
-                decision["decision_id"],
-            ),
+            """UPDATE policy_audit_records
+               SET payload_json = ?, payload_sha256 = ?
+               WHERE record_type = 'policy_candidate_decision' AND record_id = ?""",
+            (payload_json, payload_sha256, decision["decision_id"]),
         )
 
         with pytest.raises(LedgerConflictError, match="tampered"):
@@ -630,14 +629,17 @@ def test_staging_audit_manifest_is_atomic_idempotent_and_revalidates_on_reopen(
         with pytest.raises(LedgerConflictError, match="candidate set is incomplete"):
             mutable.read_policy_staging_audit_manifests()
         mutable.connection.execute(
-            "DELETE FROM policy_candidate_decisions WHERE decision_id = ?",
+            "DELETE FROM policy_audit_records "
+            "WHERE record_type = 'policy_candidate_decision' AND record_id = ?",
             (extra["decision_id"],),
         )
     finally:
         mutable.close()
 
     tamper = sqlite3.connect(path)
-    tamper.execute("DELETE FROM policy_candidate_decisions")
+    tamper.execute(
+        "DELETE FROM policy_audit_records WHERE record_type = 'policy_candidate_decision'"
+    )
     tamper.commit()
     tamper.close()
     reopened = PortfolioLedger.open_existing(path)
@@ -729,35 +731,29 @@ def test_staging_manifest_read_rejects_coherent_invalid_rewrite_on_reopen(
         )
         if tamper == "empty_policy_id":
             row = ledger.connection.execute(
-                "SELECT payload_json FROM policy_staging_audit_manifests"
+                "SELECT payload_json FROM policy_audit_records "
+                "WHERE record_type = 'policy_staging_audit_manifest'"
             ).fetchone()
             payload = json.loads(str(row["payload_json"]))
             payload["policy_id"] = ""
             payload_json = json.dumps(
                 payload, sort_keys=True, separators=(",", ":")
             )
-            manifest_id = stable_id(
-                "policy_staging_audit_manifest", payload_json
-            )
+            payload_sha256 = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
             ledger.connection.execute(
-                """UPDATE policy_staging_audit_manifests
-                   SET manifest_id = ?, policy_id = '', payload_json = ?,
-                       payload_digest = ?""",
-                (
-                    manifest_id,
-                    payload_json,
-                    stable_id(
-                        "policy_staging_audit_payload", manifest_id, payload_json
-                    ),
-                ),
+                """UPDATE policy_audit_records
+                   SET payload_json = ?, payload_sha256 = ?
+                   WHERE record_type = 'policy_staging_audit_manifest'""",
+                (payload_json, payload_sha256),
             )
             ledger.connection.execute(
                 "UPDATE staging_runs SET policy_id = ''"
             )
         else:
             ledger.connection.execute(
-                """UPDATE policy_staging_audit_manifests
-                   SET recorded_at = '2026-07-31T20:00:00'"""
+                """UPDATE policy_audit_records
+                   SET created_at = '2026-07-31T20:00:00'
+                   WHERE record_type = 'policy_staging_audit_manifest'"""
             )
     finally:
         ledger.close()
@@ -845,7 +841,8 @@ def test_removed_bound_context_breaks_companion_read_and_projection_on_reopen(
     try:
         _stage_policy_entry(ledger)
         ledger.connection.execute(
-            "DELETE FROM policy_session_contexts WHERE cohort_id = ? AND session = ?",
+            "DELETE FROM policy_audit_records "
+            "WHERE record_type = 'policy_session_context' AND cohort_id = ? AND session = ?",
             (COHORT, FRIDAY.isoformat()),
         )
     finally:
@@ -866,8 +863,8 @@ def test_tampered_bound_context_breaks_existing_companion_projection(tmp_path) -
     try:
         _stage_policy_entry(ledger)
         ledger.connection.execute(
-            "UPDATE policy_session_contexts SET context_digest = 'tampered' "
-            "WHERE cohort_id = ? AND session = ?",
+            "UPDATE policy_audit_records SET payload_sha256 = 'tampered' "
+            "WHERE record_type = 'policy_session_context' AND cohort_id = ? AND session = ?",
             (COHORT, FRIDAY.isoformat()),
         )
 
@@ -892,7 +889,8 @@ def test_policy_session_apis_reject_datetime_before_write_or_read(tmp_path) -> N
             )
         assert (
             ledger.connection.execute(
-                "SELECT COUNT(*) FROM policy_session_contexts"
+                "SELECT COUNT(*) FROM policy_audit_records "
+                "WHERE record_type = 'policy_session_context'"
             ).fetchone()[0]
             == 0
         )

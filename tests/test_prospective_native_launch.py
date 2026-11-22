@@ -342,7 +342,7 @@ def test_native_shell_propagates_selected_reference_and_reports_failure(tmp_path
     env=os.environ|{'EVENTEDGE_PYTHON':str(stub),'EVENTEDGE_LOG_DIR':str(tmp_path/'logs'),'CALLS':str(calls)}
     result=subprocess.run(['bash',str(repo/'scripts/daily_trading.sh'),*args],env=env,capture_output=True,text=True)
     assert result.returncode==1
-    lines=calls.read_text().splitlines();assert len(lines)==6
+    lines=calls.read_text().splitlines();assert len(lines)==5
     assert all('--validate-prospective-launch' in line for line in lines[:2])
     assert all('--date '+SESSION in line for line in lines[2:])
     calls.unlink();env['VALIDATE_RC']='2'

@@ -25,20 +25,23 @@ from tradingagents.strategies.orchestration.runtime_lock import canonical_runtim
 from tradingagents.strategies.orchestration.source_coverage import (
     aggregate_source_health_failures, canonical_source_scope_limits, source_scope_limits_from_health,
 )
+from tradingagents.strategies.orchestration._io import (
+    CANONICAL_COHORTS,
+    load_json_strict,
+    open_sqlite,
+)
 from tradingagents.strategies.orchestration.source_inputs import (
     CONTRACT_VERSION, MAX_BYTES, SourceInputStore, configuration_fingerprint,
 )
+from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
 from tradingagents.strategies.state.portfolio_ledger import LedgerConflictError, PortfolioLedger
 
-EXPECTED_COHORTS = tuple(sorted(
-    f'horizon_{horizon}_size_{size}'
-    for horizon in ('30d', '3m', '6m', '1y') for size in ('5k', '10k', '50k', '100k')
-))
+EXPECTED_COHORTS = tuple(sorted(CANONICAL_COHORTS))
 _SAFE_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,191}')
 _PROVIDERS = frozenset({'edgar','fred','finnhub','congress','regulations','courtlistener',
                         'noaa','usda','drought_monitor','usaspending','cftc','yfinance','openbb'})
 _HEALTHY = frozenset({'signals', 'legitimate_no_event'})
-_FAILURES = frozenset({'data_failure', 'strategy_defect'})
+_FAILURES = frozenset({'data_failure', 'strategy_defect', 'unavailable'})
 _PREFLIGHT_LABELS = {
     'screen': 'screen (source screening)',
     'governed': 'governed (price readiness)',
@@ -47,35 +50,32 @@ _PREFLIGHT_LABELS = {
 _CONFIG_DIGEST = re.compile(r'[0-9a-f]{64}')
 
 
+def _metrics_db_path(state: Path) -> Path:
+    unified = state / GENERATION_DB_FILENAME
+    return unified if unified.is_file() else (state / 'metrics_v2.sqlite3')
+
+
+def _cohort_db_path(state: Path, cohort_name: str) -> tuple[Path, bool]:
+    unified = state / GENERATION_DB_FILENAME
+    if unified.is_file():
+        return unified, True
+    return state / cohort_name / 'portfolio.db', False
+
+
 def _safe_id(value: Any) -> bool:
     return isinstance(value, str) and _SAFE_ID.fullmatch(value) is not None
 
 
 def _load_json(path: Path) -> Any:
-    if path.stat().st_size > 32 * 1024 * 1024:
-        raise ValueError('document too large')
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError('duplicate JSON field')
-            result[key] = value
-        return result
-    return json.loads(path.read_text(), object_pairs_hook=unique,
-                      parse_constant=lambda _: (_ for _ in ()).throw(ValueError('nonfinite JSON')))
+    return load_json_strict(path, max_bytes=32 * 1024 * 1024, reject_symlinks=False)
 
 
 @contextmanager
 def _database(path: Path):
-    # mode=ro prevents file creation; no PortfolioLedger/MetricStore constructor.
-    connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute('PRAGMA query_only=ON')
+    # mode=ro via _io.open_sqlite with closing() guaranteed.
+    with open_sqlite(path, readonly=True) as connection:
         connection.execute('BEGIN')
         yield connection
-    finally:
-        connection.close()
 
 
 def _wire(stdout: Any) -> dict[str, Any]:
@@ -295,16 +295,6 @@ def _declared_exclusion(row: dict, disabled: dict | None = None) -> bool:
                    for strategy in get_paper_trade_strategies()
                    if strategy.name == row.get('strategy')), None)
     evidence = row.get('evidence')
-    if (row.get('strategy') == 'congressional_trades'
-            and (disabled or {}).get('congressional_trades') == 'display_audit_only_v1'
-            and isinstance(evidence, dict) and evidence.get('disclosure_policy') == 'display_audit_only_v1'):
-        reason = 'display_audit_only_v1'
-    from .filing_research_policy import POLICY as FILING_POLICY
-    if (isinstance(evidence, dict) and evidence.get('filing_research_policy') == FILING_POLICY
-            and (disabled or {}).get(row.get('strategy')) == 'filing_research_disabled'
-            and isinstance(evidence.get('filing_research_sha256'), str)
-            and re.fullmatch('[a-f0-9]{64}', evidence['filing_research_sha256'])):
-        reason = 'filing_research_disabled'
     from .source_lifecycle_policy import POLICY as LIFECYCLE_POLICY
     if (isinstance(evidence, dict) and evidence.get('source_lifecycle_policy') == LIFECYCLE_POLICY
             and (disabled or {}).get(row.get('strategy')) == evidence.get('reason')
@@ -317,7 +307,7 @@ def _declared_exclusion(row: dict, disabled: dict | None = None) -> bool:
 
 
 def _metrics(state: Path, generation: str, session: str, commit: str, diagnose, disabled=None) -> tuple[str | None, list[dict]]:
-    path = state / 'metrics_v2.sqlite3'
+    path = _metrics_db_path(state)
     if not path.exists():
         diagnose('metrics_missing')
         return None, []
@@ -356,19 +346,26 @@ def _metrics(state: Path, generation: str, session: str, commit: str, diagnose, 
 
 def _book(state: Path, name: str, generation: str, session: str, epoch: str | None, diagnose) -> dict:
     result = {'accounting_valid':False, 'staging_complete':False, 'staging_volatility':{}, 'fills':None}
-    path = state / name / 'portfolio.db'
+    path, unified = _cohort_db_path(state, name)
     if not path.exists():
         diagnose('ledger_missing', name)
         return result
     try:
         with _database(path) as connection:
-            identity = connection.execute("SELECT metadata_value FROM schema_metadata WHERE metadata_key='cohort_id'").fetchone()
-            if identity is None or identity[0] != name:
-                diagnose('ledger_cohort_conflict', name)
-            runs = connection.execute('SELECT * FROM session_runs WHERE session=?', (session,)).fetchall()
-            snapshots = connection.execute('SELECT * FROM account_snapshots WHERE session=?', (session,)).fetchall()
-            contexts = connection.execute('SELECT * FROM session_execution_contexts WHERE session=?', (session,)).fetchall()
-            valid = (identity is not None and identity[0] == name and epoch is not None
+            if unified:
+                identity_ok = True
+                runs = connection.execute('SELECT * FROM session_runs WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+                snapshots = connection.execute('SELECT * FROM account_snapshots WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+                contexts = connection.execute('SELECT * FROM session_execution_contexts WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+            else:
+                identity = connection.execute("SELECT metadata_value FROM schema_metadata WHERE metadata_key='cohort_id'").fetchone()
+                identity_ok = identity is not None and identity[0] == name
+                if not identity_ok:
+                    diagnose('ledger_cohort_conflict', name)
+                runs = connection.execute('SELECT * FROM session_runs WHERE session=?', (session,)).fetchall()
+                snapshots = connection.execute('SELECT * FROM account_snapshots WHERE session=?', (session,)).fetchall()
+                contexts = connection.execute('SELECT * FROM session_execution_contexts WHERE session=?', (session,)).fetchall()
+            valid = (identity_ok and epoch is not None
                      and len(runs)==1 and runs[0]['cohort_id']==name and runs[0]['valid']==1 and bool(runs[0]['completed_at']) and not runs[0]['invalid_reason']
                      and len(snapshots)==1 and snapshots[0]['cohort_id']==name and snapshots[0]['epoch_id']==epoch and snapshots[0]['valid']==1 and not snapshots[0]['invalid_reason']
                      and len(contexts)==1 and contexts[0]['cohort_id']==name and contexts[0]['epoch_id']==epoch)
@@ -379,9 +376,14 @@ def _book(state: Path, name: str, generation: str, session: str, epoch: str | No
                 if not equity.is_finite():
                     diagnose('snapshot_equity_invalid', name)
                     valid = False
-            stages = connection.execute('SELECT cohort_id,epoch_id,completed_at FROM staging_runs WHERE session=?', (session,)).fetchall()
-            result['staging_complete'] = len(stages)==1 and stages[0]['cohort_id']==name and stages[0]['epoch_id']==epoch and bool(stages[0]['completed_at'])
-            policy_rows=connection.execute("SELECT * FROM policy_session_contexts WHERE session=? AND binding_kind='staging'",(session,)).fetchall()
+            if unified:
+                stages = connection.execute('SELECT cohort_id,epoch_id,completed_at FROM staging_runs WHERE cohort_id=? AND session=?', (name, session)).fetchall()
+                result['staging_complete'] = len(stages)==1 and stages[0]['cohort_id']==name and stages[0]['epoch_id']==epoch and bool(stages[0]['completed_at'])
+                policy_rows=connection.execute("SELECT * FROM policy_audit_records WHERE cohort_id=? AND session=? AND record_type='policy_session_context' AND record_id=?", (name, session, f'{session}:staging')).fetchall()
+            else:
+                stages = connection.execute('SELECT cohort_id,epoch_id,completed_at FROM staging_runs WHERE session=?', (session,)).fetchall()
+                result['staging_complete'] = len(stages)==1 and stages[0]['cohort_id']==name and stages[0]['epoch_id']==epoch and bool(stages[0]['completed_at'])
+                policy_rows=connection.execute("SELECT * FROM policy_session_contexts WHERE session=? AND binding_kind='staging'",(session,)).fetchall()
             if not policy_rows and result['staging_complete']:
                 diagnose('staging_volatility_context_missing',name)
             elif policy_rows:
@@ -400,9 +402,14 @@ def _book(state: Path, name: str, generation: str, session: str, epoch: str | No
                         result['document_review_clock'] = clock
                 except (LedgerConflictError,ValueError,TypeError,KeyError,AttributeError):
                     diagnose('staging_volatility_context_invalid',name)
-            fills = connection.execute('''SELECT f.fill_id,f.side,f.session,i.intent_id,i.cohort_id,
-                i.side AS intent_side,i.eligible_session,i.price_rule FROM fills f LEFT JOIN order_intents i ON i.intent_id=f.intent_id
-                WHERE f.session=? ORDER BY f.fill_id''', (session,)).fetchall()
+            if unified:
+                fills = connection.execute('''SELECT f.fill_id,f.side,f.session,i.intent_id,i.cohort_id,
+                    i.side AS intent_side,i.eligible_session,i.price_rule FROM fills f LEFT JOIN order_intents i ON i.intent_id=f.intent_id
+                    WHERE f.cohort_id=? AND f.session=? ORDER BY f.fill_id''', (name, session)).fetchall()
+            else:
+                fills = connection.execute('''SELECT f.fill_id,f.side,f.session,i.intent_id,i.cohort_id,
+                    i.side AS intent_side,i.eligible_session,i.price_rule FROM fills f LEFT JOIN order_intents i ON i.intent_id=f.intent_id
+                    WHERE f.session=? ORDER BY f.fill_id''', (session,)).fetchall()
             def eligible(row):
                 eligible_session=date.fromisoformat(row['eligible_session'])
                 if eligible_session.isoformat()!=row['eligible_session']:
@@ -425,7 +432,7 @@ def _candidate_issues(state: Path, epoch: str | None, session: str, diagnose) ->
     if epoch is None:
         return []
     try:
-        with _database(state/'metrics_v2.sqlite3') as connection:
+        with _database(_metrics_db_path(state)) as connection:
             rows=connection.execute('''SELECT issue_id,epoch_id,session,dependency_kind,ticker,payload_json
                 FROM candidate_input_issues WHERE session=?
                 ORDER BY dependency_kind,ticker,issue_id LIMIT 1001''',(session,)).fetchall()
@@ -481,23 +488,46 @@ def _health_coverage(health: list[dict], epoch: str | None, session: str, diagno
 
 
 def _accepted_envelope(path: Path, generation: str, session: str, commit: str, *, purpose: str | None = None) -> dict:
-    from .source_inputs import FULL_FILING_MAX_BYTES, FULL_FILING_MAX_NODES
-    limits = {'max_bytes': FULL_FILING_MAX_BYTES, 'max_nodes': FULL_FILING_MAX_NODES} if purpose is None else {}
-    if path.stat().st_size > limits.get('max_bytes', MAX_BYTES):
+    from .source_inputs import _from_plain
+
+    if path.stat().st_size > MAX_BYTES:
         raise ValueError('source byte bound')
-    envelope = SourceInputStore.decode(path.read_text(), **limits)
-    identity = envelope['identity']
-    keys={'generation','session','commit','configuration'} | ({'purpose'} if purpose else set())
-    if (set(envelope) != {'version','identity','acquired_at','payload','digest'} or
-            envelope['version']!=CONTRACT_VERSION or
-            set(identity)!=keys or identity.get('purpose')!=purpose or
-            identity['generation']!=generation or identity['session']!=session or identity['commit']!=commit or
-            not isinstance(identity['configuration'],str) or not identity['configuration'] or
-            envelope['digest']!=hashlib.sha256(SourceInputStore.encode(envelope['payload'], **limits).encode()).hexdigest() or
-            not isinstance(envelope['acquired_at'],datetime) or envelope['acquired_at'].tzinfo is None or
-            envelope['acquired_at']>datetime.now(timezone.utc) or not isinstance(envelope['payload'],dict)):
+    raw_doc = load_json_strict(path, max_bytes=MAX_BYTES, reject_symlinks=False)
+    if (not isinstance(raw_doc, dict)
+            or set(raw_doc) != {'version', 'identity', 'acquired_at', 'payload', 'digest'}
+            or raw_doc['version'] != CONTRACT_VERSION):
         raise ValueError('source identity/content conflict')
-    return envelope
+    identity = raw_doc['identity']
+    keys = {'generation', 'session', 'commit', 'configuration'} | ({'purpose'} if purpose else set())
+    if (not isinstance(identity, dict) or set(identity) != keys
+            or identity.get('purpose') != purpose
+            or identity['generation'] != generation
+            or identity['session'] != session
+            or identity['commit'] != commit
+            or not isinstance(identity['configuration'], str)
+            or not identity['configuration']):
+        raise ValueError('source identity/content conflict')
+    payload_json = json.dumps(raw_doc['payload'], allow_nan=False, separators=(',', ':'), sort_keys=True)
+    if raw_doc['digest'] != hashlib.sha256(payload_json.encode('utf-8')).hexdigest():
+        raise ValueError('source identity/content conflict')
+    acquired_raw = raw_doc['acquired_at']
+    if isinstance(acquired_raw, dict):
+        acquired = _from_plain(acquired_raw, depth=0)
+    else:
+        acquired = (datetime.fromisoformat(acquired_raw) if isinstance(acquired_raw, str) else acquired_raw)
+    if not isinstance(acquired, datetime) or acquired.tzinfo is None or acquired > datetime.now(timezone.utc):
+        raise ValueError('source identity/content conflict')
+    table_dir = path.parent / (path.stem + '.tables')
+    payload = _from_plain(raw_doc['payload'], depth=0, table_dir=table_dir)
+    if not isinstance(payload, dict):
+        raise ValueError('source identity/content conflict')
+    return {
+        'version': raw_doc['version'],
+        'identity': identity,
+        'acquired_at': acquired,
+        'payload': payload,
+        'digest': raw_doc['digest'],
+    }
 
 
 def _volatility(state: Path, generation: str, session: str, commit: str, sources: dict, issues: list[dict], books: dict, diagnose) -> dict:
@@ -534,58 +564,9 @@ def _volatility(state: Path, generation: str, session: str, commit: str, sources
     return result
 
 
-def _regulation_transport_recoveries(payload: dict, validated_scope: dict | None) -> tuple[dict, bool]:
-    """Bind preserved transport failures to completely replayed government copies.
-
-    Legacy diagnostics have no URL/resource identity. Therefore the entire
-    unrecovered failure multiset must match the graph's failed primary requests,
-    before report deduplication. Extra failures cannot borrow a copy's proof.
-    ``validated_scope`` comes only from validate_regulation_policy in _sources.
-    """
-    from collections import Counter
-    if (validated_scope is None or validated_scope.get('content_complete') is not True
-            or payload.get('error') not in (None, '')):
-        return {}, False
-    graph = payload['regulation_evidence']
-    proofs = []
-    from .regulation_publication_policy import SOURCE_VERSION
-    linked = graph.get('version') == SOURCE_VERSION
-    documents = graph['publication_nodes'] if linked else graph['corpus']
-    for evidence in documents.values():
-        for unit in evidence['units']:
-            failure = unit.get('primary_failure')
-            if linked:
-                attempt = evidence['capture']['primary_attempt']
-                failure = (attempt if unit['role'] == 'primary' and 'government_copy' in unit
-                    and attempt['resource_id'] == unit['resource_id']
-                    and attempt['http_status'] in (403, 404, 410) else None)
-            if failure is not None:
-                proofs.append((failure['http_status'], {
-                    'policy': graph['retrieval_policy'],
-                    'manifest_sha256': graph['manifest_sha256'],
-                    'resource_id': unit['resource_id'], 'unit_id': unit['unit_id'],
-                    'primary_receipt_sha256': failure['receipt']['sha256'],
-                    'government_receipt_sha256': unit['receipt']['sha256']}))
-    events = payload.get('_request_diagnostics', [])
-    if not proofs or not events:
-        return {}, False
-    failures = [(index, event) for index, event in enumerate(events)
-                if isinstance(event, dict) and event.get('recovered') is False
-                and event.get('reason_code') not in (None, 'success')]
-    fields = ('provider', 'operation', 'reason_code', 'http_status', 'attempts', 'recovered')
-    actual = Counter(tuple(event.get(key) for key in fields) for _, event in failures)
-    expected = Counter(('regulations', 'get', 'http_error', status, 1, False)
-                       for status, _ in proofs)
-    if actual != expected:
-        return {}, True
-    # Equal signatures are indistinguishable in the legacy event stream. Bind
-    # each exactly once, in retained corpus/resource order, retaining all IDs.
-    remaining = list(proofs)
-    recovered = {}
-    for index, event in failures:
-        position = next(i for i, (status, _) in enumerate(remaining) if status == event['http_status'])
-        _, recovered[index] = remaining.pop(position)
-    return recovered, False
+def _regulation_transport_recoveries(payload, validated_scope):
+    _ = (payload, validated_scope)
+    return {}, False
 
 
 def _award_recipient_transport_recoveries(payload: dict, *, session: str) -> tuple[dict, bool]:
@@ -704,114 +685,16 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
             retained_sources['_completion_source_envelope'] = envelope
         result['configuration'] = identity['configuration']
         result['acquired_at'] = envelope['acquired_at'].isoformat()
-        from .congress_policy import declared_exclusions, audit_scope, POLICY as CONGRESS_POLICY
-        exclusions = declared_exclusions(envelope['payload'])
-        congress_config = ({'congress_disclosure_policy': CONGRESS_POLICY,
-                            'disabled_strategies': exclusions} if exclusions else {})
-        congress_scope = audit_scope(envelope['payload'], congress_config, session,
-                                    now=envelope['acquired_at'], replay=True)
-        from .source_lifecycle_policy import declared_scope, exclusions as retirement_exclusions
-        if operating_profile is not None:
-            from .operating_contract import configure_strategies
-            strategies = configure_strategies(get_paper_trade_strategies(), operating_profile.config['autoresearch'], full_config=operating_profile.config)
-            retirement_scope = declared_scope(envelope['payload'], operating_profile.config['autoresearch'], strategies)
-        else:
-            retirement_scope = declared_scope(envelope['payload'])
-        from .filing_research_policy import declared_scope as declared_filing_scope
-        bulk_scope = declared_filing_scope(envelope['payload'],
-            config=operating_profile.config['autoresearch'] if operating_profile is not None else {})
-        if bulk_scope is not None:
-            result['filing_research_scope'] = bulk_scope
-            exclusions = {**exclusions, **bulk_scope['disabled_strategies']}
-        if retirement_scope is not None:
-            result['retirement_scope'] = retirement_scope
-            exclusions = {**exclusions, **retirement_exclusions(retirement_scope)}
-        if exclusions:
-            result['declared_exclusions'] = exclusions
-        if congress_scope is not None:
-            result['congress_audit_scope'] = congress_scope
-        from .filing_policy_validation import validate_filing_comparison_policy
-        graph = envelope['payload'].get('edgar', {}).get('filing_evidence')
-        filing_config = ({'filing_evidence_policy': graph.get('policy'),
-                          'filing_comparison_policy': graph.get('coverage', {}).get('comparator_policy'),
-                          'filing_attribution_policy': graph.get('coverage', {}).get('attribution_policy'),
-                          'filing_parser_policy': graph.get('coverage', {}).get('parser_policy'),
-                          'filing_acquisition_policy': graph.get('coverage', {}).get('acquisition_policy'),
-                          'filing_material_policy': graph.get('coverage', {}).get('material_policy')}
-                         if isinstance(graph, dict) else {})
-        from .filing_material_validation import validate_filing_material_policy
-        material_scope = validate_filing_material_policy(envelope['payload'], filing_config)
-        if material_scope is not None:
-            result['filing_material_scope'] = material_scope
-        from .filing_acquisition_validation import validate_filing_acquisition_policy
-        acquisition_scope = validate_filing_acquisition_policy(envelope['payload'], filing_config)
-        if acquisition_scope is not None:
-            result['filing_acquisition_scope'] = acquisition_scope
-        filing_scope = validate_filing_comparison_policy(envelope['payload'], filing_config)
-        if filing_scope is not None:
-            result['filing_comparison_scope'] = filing_scope
-        from .filing_attribution_validation import validate_filing_attribution_policy, filing_source_error_sha256
-        attribution_scope = validate_filing_attribution_policy(envelope['payload'], filing_config)
-        if attribution_scope is not None:
-            result['filing_attribution_scope'] = attribution_scope
-        regulation_graph = envelope['payload'].get('regulations', {}).get('regulation_evidence')
-        from .regulation_inputs import validate_regulation_policy
-        from .regulation_publication_policy import source_configuration
-        regulation_config = source_configuration(regulation_graph, frozen_config)
-        regulation_scope = validate_regulation_policy(envelope['payload'], regulation_config)
-        regulation_recoveries, regulation_mismatch = _regulation_transport_recoveries(
-            envelope['payload'].get('regulations', {}), regulation_scope)
         award_recipient_recoveries, award_recipient_mismatch = _award_recipient_transport_recoveries(
             envelope['payload'].get('usaspending', {}), session=session)
-        if regulation_scope is not None:
-            result['regulation_source_coverage'] = regulation_scope
-            if retained_sources is not None:
-                # Reuse retained objects only inside this report call; never
-                # publish full rules, originals or universe files in the report.
-                retained_sources.update({key: envelope['payload'][key] for key in
-                    ('regulations', 'equity_universe') if key in envelope['payload']})
-                retained_sources['edgar'] = {'company_tickers': envelope['payload'].get('edgar', {}).get('company_tickers', {})}
-        source_error_digest = filing_source_error_sha256(envelope['payload'].get('edgar'))
-        if source_error_digest is not None:
-            result['filing_source_error_sha256'] = source_error_digest
-        from .state_inputs import declared_state_config, state_policy_scope
-        state_config = declared_state_config(envelope['payload'])
-        if state_config:
-            state_scope = state_policy_scope(envelope['payload'], state_config, session)
-            result['state_source_scope'] = state_scope
-            if retained_sources is not None:
-                retained_sources.update({key: envelope['payload'][key] for key in ('fred','edgar','equity_universe') if key in envelope['payload']})
-                retained_sources['_state_config'] = state_config
-        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
-        from .bounded_document_inputs import POLICY as DOCUMENT_POLICY, configure_strategies as document_strategies
-        document_config = {}
-        if 'bounded_documents' in envelope['payload']:
-            document_scope = envelope['payload']['bounded_documents'].get('bounded_document_scope', {})
-            if (document_scope.get('policy') != DOCUMENT_POLICY
-                    or document_scope.get('population') != 'configured_retained_document_registry'):
-                raise ValueError('bounded document source scope invalid')
-            document_config = {'bounded_document_research_policy': DOCUMENT_POLICY}
-            from ..document_review_clock import POLICY as DOCUMENT_NEXT_OPEN_POLICY, review_clock
-            if document_scope.get('decision_policy') == DOCUMENT_NEXT_OPEN_POLICY:
-                declared = document_scope.get('review_clock_config')
-                if type(declared) is not dict or set(declared) != {'bounded_document_decision_policy',
-                        'decision_clock_policy','research_resilience_policy','bounded_document_recognition_request_version','llm_temperature'}:
-                    raise ValueError('invalid_document_decision_clock_policy')
-                document_config.update(declared)
-                review_clock({'autoresearch':document_config},session)
-                if retained_sources is not None:
-                    retained_sources['_document_clock_source'] = envelope
-            if retained_sources is not None:
-                retained_sources['_bounded_document_config'] = document_config
-            result['bounded_document_scope'] = document_scope
-        if retirement_scope is not None and 'bounded_document_research' in retirement_scope['strategy_sources']:
-            document_config = {'bounded_document_research_policy': DOCUMENT_POLICY}
-            if retained_sources is not None:
-                retained_sources['_bounded_document_config'] = document_config
-        required={source for strategy in document_strategies(configure_strategies(get_paper_trade_strategies(), state_config), document_config) for source in strategy.data_sources if source!='openbb'}
-        if retirement_scope is not None:
-            required = {source for sources in retirement_scope['strategy_sources'].values()
-                        for source in sources if source != 'openbb'} - retirement_scope['retired_sources'].keys()
+        regulation_recoveries, regulation_mismatch = {}, False
+        bulk_scope = None
+        active_strategies = get_paper_trade_strategies()
+        if operating_profile is not None:
+            from .operating_contract import configure_strategies
+            active_strategies = configure_strategies(active_strategies, operating_profile.config['autoresearch'], full_config=operating_profile.config)
+        _active_tier2 = frozenset({'yfinance', 'fred', 'finnhub', 'usaspending', 'noaa', 'usda', 'drought_monitor', 'cftc'})
+        required = {source for strategy in active_strategies for source in strategy.data_sources if source in _active_tier2}
         for source in sorted(required-set(envelope['payload'])):
             diagnose('accepted_source_missing',source)
             result['observations'][source]='missing'
@@ -826,7 +709,7 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                 continue
             coverage=payload.get('_coverage')
             coverage_status=coverage.get('status') if isinstance(coverage,dict) else None
-            if '_coverage' in payload and coverage_status not in {'success','success_empty','complete','partial','failed'}:
+            if '_coverage' in payload and coverage_status not in {'ok','success','success_empty','complete','partial','failed','unavailable'}:
                 diagnose('source_coverage_invalid',source)
                 result['observations'][source]='invalid'
                 result['unresolved'].append({'provider':source,'reason_code':'invalid_response','http_status':None})
@@ -879,30 +762,6 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
     return result
 
 
-def _decision_shadow(state: Path, generation: str, session: str, epoch: str | None, commit: str) -> dict:
-    """Summarize optional semantic observations independently of run validity."""
-    unavailable = {'status':'unavailable','mode':'shadow','affects_trading':False,
-                   'model':'@cf/cloudflare/clef','event_counts':{},'assessed_events':0,
-                   'choices':{},'skipped_events':0,'selection_truncated':False}
-    try:
-        from collections import Counter
-        from tradingagents.strategies.orchestration.decision_shadow import read_shadow_summary
-        document = read_shadow_summary(state/'decision_shadow'/f'{session}.json',
-            generation=generation, session=session, epoch_id=epoch, generation_commit=commit)
-        events = document.get('events', [])
-        return {'status':document['status'], 'mode':'shadow', 'affects_trading':False,
-                'model':document.get('model','@cf/cloudflare/clef'),
-                'event_counts':dict(sorted(Counter(row['status'] for row in events).items())),
-                'assessed_events':sum(row['status']=='ok' for row in events),
-                'choices':dict(sorted(Counter(row['answer']['choice'] for row in events if row['status']=='ok').items())),
-                'skipped_events':document.get('skipped_events',0),
-                'selection_truncated':document.get('selection_truncated',False)}
-    except Exception:
-        # Optional classifier corruption or failure must not suppress the
-        # authoritative financial report, including parser recursion failures.
-        return unavailable
-
-
 def report_runtime_guard(repo, *, snapshot_guaranteed=False):
     """Retain a verified controller lease without releasing or downgrading it."""
     if snapshot_guaranteed:
@@ -953,8 +812,7 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             matches = [row for row in manifest['generations'] if row['gen_id']==generation]
             if len(matches)!=1 or not _safe_id(matches[0]['git_commit']):
                 raise ValueError('generation identity conflict')
-            from .source_retirement import generation_for_session
-            metadata = generation_for_session(matches[0], session)
+            metadata = matches[0]
             commit = metadata['git_commit']
             state = Path(metadata['state_dir'])
             state = state.resolve() if state.is_absolute() else (repo/state).resolve()
@@ -994,130 +852,21 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
             operating_profile=operating_profile, frozen_config=frozen_profile)
         completion_source = retained_sources.get('_completion_source_envelope')
         disabled = report['sources'].get('declared_exclusions', {})
-        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
-        report_strategies = configure_strategies(get_paper_trade_strategies(), retained_sources.get('_state_config', {}))
-        from .bounded_document_inputs import configure_strategies as document_strategies
-        report_strategies = document_strategies(report_strategies, retained_sources.get('_bounded_document_config', {}))
+        report_strategies = list(get_paper_trade_strategies())
         if operating_profile is not None:
             from .operating_contract import configure_strategies
             report_strategies = configure_strategies(report_strategies, operating_profile.config['autoresearch'], full_config=operating_profile.config)
         epoch,health = _metrics(state,generation,session,commit,diagnose,disabled)
-        from .source_lifecycle_policy import validate_health as validate_retirement_health
-        try:
-            validate_retirement_health(report['sources'].get('retirement_scope'), health,
-                {row['policy_id'] for row in health})
-        except (ValueError, TypeError, KeyError):
-            diagnose('source_retirement_health_conflict')
-        if operating_profile is not None:
-            from .filing_research_policy import validate_health as validate_filing_health
-            try:
-                validate_filing_health(report['sources'].get('filing_research_scope'), health,
-                    operating_profile.horizon_policies.values())
-            except (ValueError, TypeError, KeyError):
-                diagnose('filing_research_health_conflict')
         report['epoch_id'] = epoch
-        report['decision_shadow'] = _decision_shadow(state,generation,session,epoch,commit)
         report['cohorts'] = {name:_book(state,name,generation,session,epoch,diagnose) for name in EXPECTED_COHORTS}
         report['accounting_valid'] = all(row['accounting_valid'] for row in report['cohorts'].values())
         report['staging_complete'] = all(row['staging_complete'] for row in report['cohorts'].values())
-        if '_document_clock_source' in retained_sources:
-            try:
-                from ..document_review_clock import validate_report_clock
-                from .generation_config import read_generation_config
-                _, frozen_profile, _ = read_generation_config(metadata['config_file'],metadata['config_sha256'])
-                report['document_review_clock'] = validate_report_clock(state,generation,session,commit,epoch,
-                    retained_sources['_document_clock_source'],frozen_profile,report['cohorts'])
-            except (OSError,ValueError,TypeError,KeyError,AttributeError):
-                report['document_review_clock'] = {'valid':False}
-                diagnose('document_review_clock_invalid')
-        elif any('document_review_clock' in book for book in report['cohorts'].values()):
-            diagnose('document_review_clock_invalid')
         report['candidate_input_issues'] = _candidate_issues(state,epoch,session,diagnose)
         for row in report['cohorts'].values():
-            # The pipeline shares its quarantine set across all staging calls.
-            # Completion records the phase, validity records accepted inputs.
             row['staging_valid'] = row['staging_complete'] and not report['candidate_input_issues']
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())
         report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose,disabled,
             strategies={strategy.name for strategy in report_strategies})
-        try:
-            expected_attribution = report['sources'].get('filing_attribution_scope')
-            source_error_digest = report['sources'].get('filing_source_error_sha256')
-            if expected_attribution is not None or source_error_digest is not None:
-                from .filing_attribution_validation import validate_filing_attribution_health
-                strategy_sources = {strategy.name: strategy.data_sources for strategy in report_strategies
-                                  if 'edgar' in strategy.data_sources and strategy.name not in disabled
-                                  and not getattr(strategy, 'retirement_reason', None)}
-                validate_filing_attribution_health(health, {row['policy_id'] for row in health},
-                    set(strategy_sources), expected_attribution, expected_error_sha256=source_error_digest,
-                    strategy_sources=strategy_sources)
-            elif any('filing_attribution_scope' in row['evidence'] for row in health):
-                raise ValueError('unbound filing attribution health')
-        except (ValueError, TypeError, KeyError):
-            diagnose('filing_attribution_scope_conflict')
-        try:
-            expected_material = report['sources'].get('filing_material_scope')
-            if expected_material is not None:
-                from .filing_material_validation import validate_filing_material_health
-                strategies = {strategy.name for strategy in report_strategies
-                              if 'edgar' in strategy.data_sources and strategy.name not in disabled
-                              and not getattr(strategy, 'retirement_reason', None)}
-                validate_filing_material_health(health, {row['policy_id'] for row in health},
-                                               strategies, expected_material)
-            elif any('filing_material_scope' in row['evidence'] for row in health):
-                raise ValueError('unbound filing material health')
-        except (ValueError, TypeError, KeyError):
-            diagnose('filing_material_scope_conflict')
-        try:
-            expected_regulation = report['sources'].get('regulation_source_coverage')
-            if expected_regulation is not None:
-                from .regulation_validation import validate_regulation_health
-                strategy_sources = {strategy.name: strategy.data_sources for strategy in report_strategies
-                    if 'regulations' in strategy.data_sources and strategy.name not in disabled
-                    and not getattr(strategy, 'retirement_reason', None)}
-                assessment_config = {}
-                if metadata.get('config_file') is not None:
-                    from .generation_config import read_generation_config
-                    _, profile, _ = read_generation_config(metadata['config_file'], metadata['config_sha256'])
-                    profile_ar = profile.get('autoresearch', {})
-                    if (profile_ar.get('regulation_publication_policy') is not None
-                            or expected_regulation.get('publication_policy') is not None
-                            or profile_ar.get('regulation_assessment_policy') is not None
-                            or 'graphics_execution_policy' in profile_ar
-                            or 'regulation_prompt_budget_policy' in profile_ar
-                            or 'regulation_graphics_model_policy' in profile_ar):
-                        from ..data_sources.regulation_assessment import configured as assessment_configured
-                        assessment_configured(profile_ar)
-                        if (profile_ar.get('regulation_evidence_policy') != expected_regulation['policy']
-                                or profile_ar.get('regulation_retrieval_policy') != expected_regulation.get('retrieval_policy')
-                                or profile_ar.get('regulation_publication_policy') != expected_regulation.get('publication_policy')):
-                            raise ValueError('frozen regulation policy differs from source')
-                    if 'graphics_execution_policy' in profile_ar or 'regulation_graphics_model_policy' in profile_ar:
-                        from ..data_sources.regulation_graphics_grid import configured as graphics_configured
-                        graphics_configured(profile)
-                    for key in ('regulation_publication_policy', 'decision_clock_policy',
-                            'regulation_assessment_policy', 'graphics_execution_policy', 'regulation_prompt_budget_policy',
-                            'regulation_graphics_model_policy'):
-                        if profile_ar.get(key) is not None:
-                            assessment_config[key] = profile_ar[key]
-                report['sources']['regulation_analysis_coverage'] = validate_regulation_health(
-                    retained_sources, health, {row['policy_id'] for row in health}, strategy_sources,
-                    {'regulation_evidence_policy': expected_regulation['policy'],
-                     **({'regulation_retrieval_policy': expected_regulation['retrieval_policy']}
-                        if 'retrieval_policy' in expected_regulation else {}), **assessment_config})
-            elif any('regulation_source_coverage' in row['evidence'] for row in health):
-                raise ValueError('unbound regulation health')
-        except (ValueError, TypeError, KeyError):
-            diagnose('regulation_evidence_conflict')
-        try:
-            if report['sources'].get('state_source_scope') is not None:
-                from .state_inputs import validate_state_health
-                validate_state_health(retained_sources, retained_sources['_state_config'], session, health,
-                    {row['policy_id'] for row in health})
-            elif any('state_source_scope' in row['evidence'] for row in health):
-                raise ValueError('unbound_state_health')
-        except (ValueError, TypeError, KeyError):
-            diagnose('state_economics_evidence_conflict')
         retained_sources.clear()
         try:
             scope_limits = source_scope_limits_from_health(health)
@@ -1261,13 +1010,17 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
 def _completion_facts(state, profile, report, health, source_envelope, diagnose, *, enrichment_observation=None):
     """Read immutable screening and native committee rows without store writes."""
     from .research_screening import _decode, _digest, VERSION, screening_codec_limits
+    from .source_inputs import source_codec_limits
     facts = {'report': report, 'health': health, 'source_envelope': source_envelope or {}, 'committees': {}}
     sample = {}
     try:
         identity = source_envelope['identity']
+        source_digest = hashlib.sha256(
+            SourceInputStore.encode(source_envelope['payload'], **source_codec_limits(profile.config)).encode()
+        ).hexdigest()
         binding = {'policy': 'dependency_isolation_v1', 'source_identity': identity,
-            'epoch_id': report['epoch_id'], 'source_digest': source_envelope['digest'],
-            'horizon_policies': profile.horizon_policies, 'strategies': list(profile.strategies)}
+            'epoch_id': report['epoch_id'], 'source_digest': source_digest,
+            'horizon_policies': profile.horizon_policies, 'strategies': sorted(profile.strategies)}
         store = SourceInputStore(state / 'source_cache', accepted_dir=state / 'source_inputs/screening',
             **screening_codec_limits())
         checkpoint_identity = {**identity, 'purpose': VERSION, 'epoch_id': report['epoch_id'],
@@ -1307,11 +1060,20 @@ def _completion_facts(state, profile, report, health, source_envelope, diagnose,
         diagnose('accepted_screening_invalid')
     for name in profile.roster:
         try:
-            with _database(state / name / 'portfolio.db') as connection:
-                stages = connection.execute('SELECT policy_id FROM staging_runs WHERE session=?', (report['session'],)).fetchall()
+            db_path, unified = _cohort_db_path(state, name)
+            with _database(db_path) as connection:
+                stages = (
+                    connection.execute('SELECT policy_id FROM staging_runs WHERE cohort_id=? AND session=?', (name, report['session'])).fetchall()
+                    if unified
+                    else connection.execute('SELECT policy_id FROM staging_runs WHERE session=?', (report['session'],)).fetchall()
+                )
                 if len(stages) != 1 or stages[0]['policy_id'] != profile.ledger_policy_id:
                     raise ValueError('staging policy differs from frozen profile')
-                rows = connection.execute('SELECT * FROM committee_decisions WHERE session=?', (report['session'],)).fetchall()
+                rows = (
+                    connection.execute('SELECT * FROM committee_decisions WHERE cohort_id=? AND session=?', (name, report['session'])).fetchall()
+                    if unified
+                    else connection.execute('SELECT * FROM committee_decisions WHERE session=?', (report['session'],)).fetchall()
+                )
                 if len(rows) != 1 or rows[0]['epoch_id'] != report['epoch_id'] or rows[0]['policy_id'] != profile.ledger_policy_id:
                     raise ValueError('committee identity differs from frozen profile')
                 raw = rows[0]['payload_json']
@@ -1351,17 +1113,15 @@ def _completion_facts(state, profile, report, health, source_envelope, diagnose,
                 from .research_resilience import validate_book_source_scope
                 regime = sample[name.split('_')[1]][1]
                 validate_book_source_scope(status, regime, codec_limits=store.codec_limits)
-                _validate_committee_content(connection, name, profile, report, document, sample[name.split('_')[1]][0])
+                accepted_pool = (
+                    [s for h_signals, _, _ in sample.values() for s in h_signals]
+                    if unified
+                    else sample[name.split('_')[1]][0]
+                )
+                _validate_committee_content(connection, name, profile, report, document, accepted_pool)
                 facts['committees'][name] = document
         except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
             diagnose('accepted_committee_invalid', name)
-    try:
-        from .enrichment_capabilities import configured as enrichment_configured
-        if enrichment_configured(profile.config['autoresearch']):
-            facts['enrichment_scope'] = _accepted_enrichment_scope(
-                state, profile, report, source_envelope, facts['committees'], observation=enrichment_observation)
-    except (OSError, sqlite3.Error, LedgerConflictError, ValueError, TypeError, KeyError, AttributeError):
-        diagnose('accepted_enrichment_invalid')
     return facts
 
 
@@ -1391,7 +1151,9 @@ def _accepted_enrichment_scope(state, profile, report, source_envelope, committe
     store = SourceInputStore(state / 'source_cache', accepted_dir=state / 'source_inputs/decision_inputs',
         **source_codec_limits(config))
     source = source_envelope['payload']
-    source_digest = source_envelope['digest']
+    source_digest = hashlib.sha256(
+        SourceInputStore.encode(source, **source_codec_limits(config)).encode()
+    ).hexdigest()
     clock._require_research_source(store, source, source_digest)
     purpose = ('research-historical-decision-inputs-v1' if clock.policy(config) == clock.HISTORICAL
         else 'prospective-decision-inputs-v1')
@@ -1400,7 +1162,8 @@ def _accepted_enrichment_scope(state, profile, report, source_envelope, committe
     with ExitStack() as stack:
         cohorts, protected = [], set()
         for name in profile.roster:
-            connection = stack.enter_context(_database(state / name / 'portfolio.db'))
+            db_path, _unified = _cohort_db_path(state, name)
+            connection = stack.enter_context(_database(db_path))
             ledger = PortfolioLedger.__new__(PortfolioLedger)
             ledger._connection, ledger.cohort_id = connection, name
             economic_context = ledger.session_execution_context(session)
@@ -1419,7 +1182,7 @@ def _accepted_enrichment_scope(state, profile, report, source_envelope, committe
 
         eligibility = None
         if ar.get('new_entry_eligibility_policy') == ELIGIBILITY_POLICY:
-            metrics = MetricStore.open_existing(state / 'metrics_v2.sqlite3')
+            metrics = MetricStore.open_existing(_metrics_db_path(state))
             binding = metrics.read_candidate_signal_identity_binding(epoch, session)
             if binding is None or binding.epoch_id != epoch or binding.session != session:
                 raise ValueError('accepted enrichment lacks candidate identity binding')
@@ -1695,16 +1458,6 @@ def render_operational_report(report: dict) -> str:
             'Runtime observations are separate from provider repair incidents. Recovery requires a later successful equivalent screen; original failures remain preserved.', ''])
         for row in report['preflight_runtime_observations']:
             lines.append(f"- {row['attempt_id']}: {row['status']}; generation={row['generation_id']}; session={row['session']}; mode={row['preflight_mode']}; phase={row['phase']}; reason={row['reason_code']}; commit={row['generation_commit']}; configuration={row['configuration']}; resolved_by={row['resolved_by'] or 'none'}.")
-    if 'decision_shadow' in report:
-        shadow = report['decision_shadow']
-        counts = ', '.join(f'{status}: {count}' for status,count in sorted(shadow['event_counts'].items())) or 'no recorded events'
-        lines.extend(['','## Clef evidence shadow','',
-            f"Status: {shadow['status']}; assessed events: {shadow['assessed_events']}; {counts}.",
-            'This optional evidence check does not affect trading, accounting validity or source coverage. Its probabilities describe evidence support, not trading returns.'])
-        if shadow['choices']:
-            lines.append('Answers: '+', '.join(f'{choice}: {count}' for choice,count in sorted(shadow['choices'].items()))+'.')
-        if shadow['selection_truncated']:
-            lines.append(f"Session sampling cap excluded {shadow['skipped_events']} additional events.")
     if report['diagnostics']:
         lines.extend(['','## Evidence diagnostics',''])
         lines.extend(f"- {row['code']}" + (f" ({row['scope']})" if 'scope' in row else '') for row in report['diagnostics'])

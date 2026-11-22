@@ -80,7 +80,7 @@ class TestProtocol:
         assert "noaa" in strategy.data_sources
         assert "usda" in strategy.data_sources
         assert "drought_monitor" in strategy.data_sources
-        assert "openbb" in strategy.data_sources
+        assert "openbb" not in strategy.data_sources
 
     def test_param_space_has_new_params(self, strategy):
         space = strategy.get_param_space()

@@ -7,8 +7,8 @@ from types import SimpleNamespace as N
 import pytest
 import requests
 
-from tradingagents.strategies.data_sources import finra_query, openbb_source
-from tradingagents.strategies.data_sources.finra_bulk import validated_acquisition
+from tradingagents.strategies.data_sources import enrichment_source, finra_query
+from tradingagents.strategies.data_sources.finra_query import validated_acquisition
 from tradingagents.strategies.data_sources.request_policy import provider_budget
 
 
@@ -21,7 +21,7 @@ def row(symbol, **changes):
 @pytest.fixture
 def query(monkeypatch):
     state = N(rows=[row('AAPL'), row('MSFT')], calls=[], hook=None)
-    monkeypatch.setattr(openbb_source, 'acquisition_time', lambda: '2026-10-31T09:00:00+00:00')
+    monkeypatch.setattr(enrichment_source, 'acquisition_time', lambda: '2026-10-31T09:00:00+00:00')
     class Session:
         trust_env = True
         def post(self, url, **kwargs):
@@ -40,8 +40,7 @@ def query(monkeypatch):
         def close(self):
             pass
     monkeypatch.setattr(finra_query.requests, 'Session', Session)
-    state.source = openbb_source.OpenBBSource()
-    monkeypatch.setattr(state.source, '_get_obb', lambda: pytest.fail('API route initialized SDK'))
+    state.source = enrichment_source.EnrichmentSource()
     return state
 
 
@@ -70,7 +69,7 @@ def test_partial_query_retries_only_missing_symbols_and_retains_provenance(query
 
 def test_cache_rechecks_current_publication_and_reference_session(query, monkeypatch):
     query.source.fetch_short_interest(['AAPL'])
-    monkeypatch.setattr(openbb_source, 'acquisition_time', lambda: '2026-11-11T09:00:00+00:00')
+    monkeypatch.setattr(enrichment_source, 'acquisition_time', lambda: '2026-11-11T09:00:00+00:00')
     query.rows = []
     result = query.source.fetch_short_interest(['AAPL'])
     assert result['short_interest'] == {} and 'AAPL' in result['errors']
@@ -86,7 +85,7 @@ def test_transient_query_retries_with_original_clock_and_separate_receipts(query
         if len(query.calls) == 1:
             raise requests.Timeout('PRIVATE')
     query.hook = fail_once
-    with provider_budget('openbb', 10, clock=lambda: clock[0], sleep=lambda n: clock.__setitem__(0, clock[0]+n),
+    with provider_budget('enrichment', 10, clock=lambda: clock[0], sleep=lambda n: clock.__setitem__(0, clock[0]+n),
                          random_fn=lambda: 0, limits=(), max_attempts=5):
         result = query.source.fetch_short_interest(['AAPL'])
     assert len(query.calls) == 2 and clock[0] == .5
@@ -95,7 +94,7 @@ def test_transient_query_retries_with_original_clock_and_separate_receipts(query
 
 
 def test_expired_inherited_deadline_starts_no_request_and_caches_nothing(query):
-    with provider_budget('openbb', 1, clock=lambda: 2, limits=()):
+    with provider_budget('enrichment', 1, clock=lambda: 2, limits=()):
         result = query.source.fetch_short_interest(['AAPL'])
     assert not query.calls and not query.source._cache
     assert result['errors']['AAPL']['reason_code'] == 'timeout'
@@ -105,49 +104,11 @@ def test_expired_inherited_deadline_starts_no_request_and_caches_nothing(query):
 def test_query_timeout_does_not_fall_back_or_exceed_two_attempts(query):
     query.hook = lambda: (_ for _ in ()).throw(requests.Timeout('PRIVATE'))
     clock = [0.0]
-    with provider_budget('openbb', 10, clock=lambda: clock[0], sleep=lambda n: clock.__setitem__(0, clock[0]+n),
+    with provider_budget('enrichment', 10, clock=lambda: clock[0], sleep=lambda n: clock.__setitem__(0, clock[0]+n),
                          random_fn=lambda: 0, limits=(), max_attempts=5):
         result = query.source.fetch_short_interest(['AAPL'])
     assert len(query.calls) == 2 and len(result['acquisition']['attempts']) == 2
     assert result['short_interest'] == {} and query.source._cache == {}
-
-
-def test_monitor_retains_full_query_receipt_and_exact_accepted_scope(query):
-    from tradingagents.strategies.orchestration.research_resilience import project_enrichment
-    from tradingagents.strategies.orchestration.enrichment_monitor import assess_accepted_enrichment
-    query.rows = [row('AAPL')]
-    result = query.source.fetch_short_interest(['AAPL', 'MSFT'])
-    original = {'short_interest': result['short_interest'], 'errors': {'short_interest': result['errors']},
-                'short_interest_acquisition': result['acquisition']}
-    _, scope = project_enrichment(original)
-    observation = assess_accepted_enrichment(original, scope)
-    assert observation['short_interest_acquisition'] == result['acquisition']
-    assert observation['healthy_scope'] == [{'provider': 'finra', 'operation': 'short_interest', 'symbol': 'AAPL'}]
-    assert observation['status'] == 'degraded'
-    assert 'archive_coverage' not in json.dumps(observation)
-
-
-@pytest.mark.parametrize('change', ['missing_error', 'wrong_population', 'wrong_date', 'missing_number', 'boolean_number'])
-def test_monitor_rejects_query_receipt_contradicting_accepted_facts(query, change):
-    from tradingagents.strategies.orchestration.research_resilience import project_enrichment
-    from tradingagents.strategies.orchestration.enrichment_monitor import assess_accepted_enrichment
-    query.rows = [row('AAPL')]
-    result = query.source.fetch_short_interest(['AAPL', 'MSFT'])
-    original = {'short_interest': result['short_interest'], 'errors': {'short_interest': result['errors']},
-                'short_interest_acquisition': result['acquisition']}
-    if change == 'missing_error':
-        original['errors'] = {}
-    elif change == 'wrong_population':
-        original['short_interest']['OTHER'] = original['short_interest'].pop('AAPL')
-    elif change == 'wrong_date':
-        original['short_interest']['AAPL']['date'] = '2026-09-30'
-    elif change == 'missing_number':
-        original['short_interest']['AAPL'].pop('short_interest')
-    else:
-        original['short_interest']['AAPL']['short_interest'] = True
-    _, scope = project_enrichment(original)
-    with pytest.raises(ValueError, match='contradicts'):
-        assess_accepted_enrichment(original, scope)
 
 
 def test_committee_replay_keeps_original_schema4_after_different_acquisition(query, tmp_path):

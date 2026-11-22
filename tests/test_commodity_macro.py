@@ -16,13 +16,10 @@ class TestCFTCSource:
 
         source = CFTCSource()
 
-        monkeypatch.setattr("tradingagents.strategies.data_sources.cftc_source._publication_scope",
-            lambda *args: {"expected_observation_date": "2026-03-29"})
-
         # Build mock COT DataFrame with 52 weeks of data
         np.random.seed(42)
         n_weeks = 52
-        dates = pd.date_range(end="2026-04-01", periods=n_weeks, freq="W")
+        dates = pd.date_range(end="2026-03-24", periods=n_weeks, freq="W-TUE")
 
         # Gold: high managed money net long -> should signal "short" (contrarian)
         gold_longs = np.linspace(100_000, 200_000, n_weeks)
@@ -49,12 +46,18 @@ class TestCFTCSource:
 
         mock_df = pd.DataFrame(rows)
 
+        monkeypatch.setattr(
+            "tradingagents.strategies.data_sources.cftc_source.current_session_date",
+            lambda: "2026-04-01",
+        )
         with patch.object(source, "_fetch_raw_report", return_value=mock_df):
             result = source.fetch(
                 {
                     "method": "cot_positioning",
                     "commodities": ["gold"],
                     "lookback_weeks": 52,
+                    "as_of": "2026-04-01",
+                    "vintage_as_of": "2026-04-01",
                 }
             )
 
@@ -66,15 +69,12 @@ class TestCFTCSource:
         assert gold["net_position"] > 0
 
     def test_cftc_source_unavailable(self):
-        """Graceful degradation when cot_reports not installed."""
+        """Native CFTC adapter downloads annual archives directly without cot_reports."""
         from tradingagents.strategies.data_sources.cftc_source import CFTCSource
 
         source = CFTCSource()
         with patch.dict("sys.modules", {"cot_reports": None}):
-            with patch(
-                "builtins.__import__", side_effect=ImportError("no cot_reports")
-            ):
-                assert source.is_available() is False
+            assert source.is_available() is True
 
 
 class TestCommodityMacroStrategy:

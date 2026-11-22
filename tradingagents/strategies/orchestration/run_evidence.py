@@ -58,15 +58,36 @@ _EVIDENCE_FIELDS = (
     "stderr",
     "result",
 )
+_LOG_TEXT_FIELDS = frozenset({"stdout", "stderr"})
+MIN_SECRET_VALUE_LENGTH = 8
+SECRET_ENV_VAR_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "ALPACA_API_KEY",
+        "ALPACA_SECRET_KEY",
+        "APCA_API_KEY_ID",
+        "APCA_API_SECRET_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "FINNHUB_API_KEY",
+        "FRED_API_KEY",
+        "NOAA_CDO_TOKEN",
+        "USDA_NASS_API_KEY",
+        "FMP_API_KEY",
+        "SMTP_PASSWORD",
+        "EMAIL_PASSWORD",
+        "CHATGPT_PLAN_TOKEN",
+        "CHATGPT_PLAN_ACCESS_TOKEN",
+        "CHATGPT_PLAN_REFRESH_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "EVENTEDGE_API_KEY",
+    }
+)
 _CREDENTIAL_NAME_PATTERN = (
     r"(?:[a-z0-9]+[_-])*(?:api[_-]?key|apikey|access[_-]?token|"
     r"auth[_-]?token|refresh[_-]?token|token|secret(?:[_-]key)?|"
     r"password|passwd|credentials?|authorization)(?:[_-][a-z0-9]+)*"
-)
-_SENSITIVE_NAME_RE = re.compile(
-    r"(?:api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|secret|"
-    r"password|passwd|credential|authorization)",
-    re.IGNORECASE,
 )
 _TOKEN_USAGE_NAMES = frozenset({"prompt_tokens", "completion_tokens", "token_count"})
 # A worker may die halfway through a quoted value. Treat the remainder of that
@@ -105,8 +126,10 @@ def _text(value: str | bytes | None) -> str:
 def _credential_values() -> tuple[str, ...]:
     raw_values = {
         value
-        for name, value in os.environ.items()
-        if len(value) >= 4 and _SENSITIVE_NAME_RE.search(name)
+        for name in SECRET_ENV_VAR_ALLOWLIST
+        if (value := os.environ.get(name)) is not None
+        and len(value) >= MIN_SECRET_VALUE_LENGTH
+        and len(value.strip()) >= MIN_SECRET_VALUE_LENGTH
     }
     # Tracebacks and provider errors can serialize the same credential several
     # ways. Match the escaped contents as well as the original value.
@@ -119,6 +142,7 @@ def _credential_values() -> tuple[str, ...]:
             json.dumps(value)[1:-1],
             json.dumps(value, ensure_ascii=False)[1:-1],
         )
+        if len(representation) >= MIN_SECRET_VALUE_LENGTH
     }
     return tuple(sorted(values, key=len, reverse=True))
 
@@ -144,36 +168,26 @@ def _sanitize_text(
 
 
 def sanitize_evidence_text(value: str | bytes | None) -> str:
-    """Redact credential material from an operator-facing diagnostic string."""
+    """Redact credential material from an operator-facing log string."""
     return _sanitize_text(value, _credential_values())
 
 
-def _sanitize(value: Any, credential_values: tuple[str, ...]) -> Any:
-    if isinstance(value, dict):
-        return {
-            _sanitize_text(str(key), credential_values): (
-                "<redacted>"
-                if _SENSITIVE_NAME_RE.search(str(key))
-                and str(key).lower() not in _TOKEN_USAGE_NAMES
-                else _sanitize(item, credential_values)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_sanitize(item, credential_values) for item in value]
-    if isinstance(value, (str, bytes)) or value is None:
-        return _sanitize_text(value, credential_values) if value is not None else None
-    return value
-
-
 def persist_run_evidence(repo_root: str | Path, evidence: dict) -> Path:
-    """Persist one immutable attempt artifact."""
+    """Persist one immutable attempt artifact.
+
+    Redaction is restricted strictly to log text fields (``stdout`` and
+    ``stderr``) so structured ``result`` JSON is never corrupted.
+    """
     attempts_dir = Path(repo_root) / "data" / "logs" / "run_attempts"
     attempts_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     credential_values = _credential_values()
     payload = {
-        field: _sanitize(evidence[field], credential_values)
+        field: (
+            _sanitize_text(evidence[field], credential_values)
+            if field in _LOG_TEXT_FIELDS
+            else evidence[field]
+        )
         for field in _EVIDENCE_FIELDS
     }
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")

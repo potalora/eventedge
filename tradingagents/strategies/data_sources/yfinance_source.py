@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
+import tempfile
 import time
 from datetime import datetime
 from typing import Any
@@ -11,6 +14,17 @@ from .request_policy import provider_call, provider_timeout
 from .fetch_errors import SourceFetchError, source_fetch_error, source_number
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_yfinance_tz_cache() -> Path:
+    """Configure yfinance's tz cache to a process-safe writable subdir."""
+    import yfinance as yf
+
+    base = Path(os.environ.get("EVENTEDGE_YFINANCE_CACHE_DIR") or tempfile.gettempdir())
+    cache_dir = base / f"eventedge-py-yfinance-{os.getpid()}"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    yf.set_tz_cache_location(str(cache_dir))
+    return cache_dir
 
 
 def normalize_ticker(ticker: str) -> str:
@@ -27,8 +41,9 @@ class YFinanceSource:
     """Data source backed by the yfinance library.
 
     Provides raw price history, ETF returns, VIX data, and earnings dates.
-    Execution and ledger code must use ``YFinancePriceSource.get_daily_bars``
-    rather than this strategy-screen DataFrame interface.
+    Execution and ledger code must use ``AlpacaPriceSource`` /
+    ``YahooActionsBenchmarksSource`` rather than this strategy-screen
+    DataFrame interface.
     All results are cached in-memory for the duration of one generation run;
     call ``clear_cache()`` between generations.
     """
@@ -101,6 +116,7 @@ class YFinanceSource:
             return self._cache[cache_key]
 
         import yfinance as yf
+        ensure_yfinance_tz_cache()
 
         try:
             yf_tickers = normalize_tickers(tickers)
@@ -198,6 +214,7 @@ class YFinanceSource:
             return self._cache[cache_key]
 
         import yfinance as yf
+        ensure_yfinance_tz_cache()
 
         try:
             df = provider_call("yfinance", "history", lambda: yf.download(
@@ -241,6 +258,7 @@ class YFinanceSource:
             return self._cache[cache_key]
 
         import yfinance as yf
+        ensure_yfinance_tz_cache()
 
         results: dict[str, list[dict[str, Any]]] = {}
         failures, statuses = {}, {}

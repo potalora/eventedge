@@ -229,6 +229,8 @@ def test_prospective_cross_open_during_work_rolls_back_publication(tmp_path, mon
         assert not ledger.staging_completed(FRIDAY, 'epoch', 'foundation-30d')
         assert ledger.account_state() == before
         assert ledger._connection.execute('SELECT count(*) FROM order_intents').fetchone()[0] == 0
-        assert ledger._connection.execute('SELECT count(*) FROM policy_staging_audit_manifests').fetchone()[0] == 0
+        assert ledger._connection.execute(
+            "SELECT count(*) FROM policy_audit_records WHERE record_type = 'policy_staging_audit_manifest'"
+        ).fetchone()[0] == 0
     finally:
         ledger.close()

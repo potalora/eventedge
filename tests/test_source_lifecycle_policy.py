@@ -27,7 +27,9 @@ def test_explicit_retirement_stops_only_reviewed_source_acquisition(tmp_path, mo
         @classmethod
         def now(cls, tz=None):
             return now.astimezone(tz) if tz else now.replace(tzinfo=None)
+    from tradingagents.strategies.orchestration import data_acquisition
     monkeypatch.setattr(engine_module, 'datetime', FixedDatetime)
+    monkeypatch.setattr(data_acquisition, 'datetime', FixedDatetime)
     calls = []
     config = {'autoresearch': {**retirement(), 'state_dir': str(tmp_path)}}
     strategy = SimpleNamespace(name='commodity_macro', data_sources=['cftc', 'fred'])

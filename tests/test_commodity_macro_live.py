@@ -79,26 +79,3 @@ class TestFREDCommodityLive:
         for sid in series_ids:
             data = source.fetch_series(sid, "2025-01-01", "2026-04-01")
             assert len(data) > 0, f"FRED series {sid} returned empty"
-
-
-class TestOpenBBFuturesCurveLive:
-    """Live OpenBB futures curve tests."""
-
-    def test_openbb_futures_curve_live(self):
-        """Gold futures curve present, contango calculation sane."""
-        try:
-            from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
-        except ImportError:
-            pytest.skip("openbb not installed")
-
-        source = OpenBBSource()
-        if not source.is_available():
-            pytest.skip("OpenBB not available")
-
-        result = source.fetch({"method": "commodity_futures_curve", "symbol": "GC"})
-        if "error" in result:
-            pytest.skip(f"Futures curve fetch failed: {result['error']}")
-
-        assert "front_month" in result
-        assert "contango_pct" in result
-        assert isinstance(result["contango_pct"], (int, float))

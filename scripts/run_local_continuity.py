@@ -111,15 +111,16 @@ def claim_session(parent, session):
 
 
 def logical_database(path):
-    with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as db:
-        require(db.execute('PRAGMA quick_check').fetchall() == [('ok',)], 'sqlite_integrity')
-        schema = db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').fetchall()
+    from tradingagents.strategies.orchestration._io import open_sqlite
+    with open_sqlite(path, readonly=True) as db:
+        require([tuple(r) for r in db.execute('PRAGMA quick_check').fetchall()] == [('ok',)], 'sqlite_integrity')
+        schema = [tuple(r) for r in db.execute('SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name').fetchall()]
         tables = {}
         for kind, name, _, _ in schema:
             if kind != 'table':
                 continue
             quoted = '"' + name.replace('"', '""') + '"'
-            rows = sorted(digest([(type(v).__name__, v.hex() if isinstance(v, bytes) else v) for v in row])
+            rows = sorted(digest([(type(v).__name__, v.hex() if isinstance(v, bytes) else v) for v in tuple(row)])
                           for row in db.execute('SELECT * FROM ' + quoted))
             tables[name] = dict(rows=len(rows), sha256=digest(rows))
         return dict(schema=digest(schema), tables=tables,
@@ -150,6 +151,7 @@ def state_inventory(state):
 
 def copy_state(source, target):
     """Copy a locked state, using SQLite backup so committed WAL rows survive."""
+    from tradingagents.strategies.orchestration._io import snapshot_sqlite
     target.mkdir(mode=0o700)
     for path in sorted(source.rglob('*')):
         require(not path.is_symlink(), 'state_symlink')
@@ -158,9 +160,7 @@ def copy_state(source, target):
             destination.mkdir(exist_ok=True)
         elif not path.name.endswith(('-wal', '-shm', '-journal')):
             if is_database(path):
-                with sqlite3.connect(path.as_uri() + '?mode=ro', uri=True) as src:
-                    with sqlite3.connect(destination) as dst:
-                        src.backup(dst)
+                snapshot_sqlite(path, destination)
             else:
                 shutil.copyfile(path, destination)
 
@@ -218,8 +218,8 @@ def prepare(repo, profile, watchdog, dotenv):
             and ar.get('research_resilience_policy') == 'dependency_isolation_v1'
             and ar.get('llm_billing_mode') == 'chatgpt_plan'
             and ar.get('autoresearch_model') == 'gpt-6-luna' and ar.get('llm_effort') == 'high'
-            and ar.get('thesis_model') == 'gpt-6.1-sol' and ar.get('thesis_effort') == 'high'
-            and ar.get('paper_trade', {}).get('portfolio_committee_model') == 'gpt-6.1-sol'
+            and ar.get('thesis_model') in ('gpt-6.1-sol', 'gpt-6.2-sol') and ar.get('thesis_effort') == 'high'
+            and ar.get('paper_trade', {}).get('portfolio_committee_model') in ('gpt-6.1-sol', 'gpt-6.2-sol')
             and ar.get('paper_trade', {}).get('portfolio_committee_effort') == 'high', 'approved_profile_required')
     require(overlay.get('execution') == {'mode': 'paper', 'execution_enabled': False}, 'paper_only')
     folder = repo / 'data/local-continuity'; folder.mkdir(mode=0o700, parents=True)

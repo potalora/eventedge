@@ -49,11 +49,15 @@ class _Budget:
     max_attempts: int
     limits: tuple
     diagnostics: list
+    base_backoff: float = 0.5
+    max_backoff: float | None = None
+    jitter: float = 0.25
 
 
 @contextmanager
 def provider_budget(provider, deadline, *, clock=None, sleep=None,
-                    random_fn=None, max_attempts=3, limits=None, diagnostics=None):
+                    random_fn=None, max_attempts=3, limits=None, diagnostics=None,
+                    base_backoff=0.5, max_backoff=None, jitter=0.25):
     """Scope provider operations to a deadline and yield safe diagnostics."""
     if not math.isfinite(deadline) or not 1 <= max_attempts <= 5:
         raise ValueError("invalid provider acquisition budget")
@@ -65,7 +69,8 @@ def provider_budget(provider, deadline, *, clock=None, sleep=None,
     budget = _Budget(provider, deadline, clock or time.monotonic, sleep or time.sleep,
                      random_fn or random.random, max_attempts,
                      tuple(PROVIDER_LIMITS.get(provider, ()) if limits is None else limits),
-                     diagnostics if diagnostics is not None else [])
+                     diagnostics if diagnostics is not None else [],
+                     base_backoff=base_backoff, max_backoff=max_backoff, jitter=jitter)
     token = _CURRENT.set(budget)
     try:
         yield budget.diagnostics
@@ -75,7 +80,7 @@ def provider_budget(provider, deadline, *, clock=None, sleep=None,
 
 @contextmanager
 def provider_subbudget(provider, *, maximum_seconds, absolute_deadline,
-                       max_attempts=None):
+                       max_attempts=None, base_backoff=None, max_backoff=None, jitter=None):
     """Narrow a deadline/retry scope without consuming a physical request slot."""
     if (type(maximum_seconds) not in (int, float) or not math.isfinite(maximum_seconds)
             or maximum_seconds <= 0 or type(absolute_deadline) not in (int, float)
@@ -89,10 +94,19 @@ def provider_subbudget(provider, *, maximum_seconds, absolute_deadline,
         options = dict(clock=parent.clock, sleep=parent.sleep, random_fn=parent.random_fn,
                        max_attempts=min(parent.max_attempts, max_attempts) if max_attempts is not None else parent.max_attempts,
                        limits=parent.limits,
-                       diagnostics=parent.diagnostics)
+                       diagnostics=parent.diagnostics,
+                       base_backoff=parent.base_backoff if base_backoff is None else base_backoff,
+                       max_backoff=parent.max_backoff if max_backoff is None else max_backoff,
+                       jitter=parent.jitter if jitter is None else jitter)
     else:
         deadline = min(absolute_deadline, time.monotonic() + maximum_seconds)
         options = {} if max_attempts is None else {'max_attempts': max_attempts}
+        if base_backoff is not None:
+            options['base_backoff'] = base_backoff
+        if max_backoff is not None:
+            options['max_backoff'] = max_backoff
+        if jitter is not None:
+            options['jitter'] = jitter
     with provider_budget(provider, deadline, **options) as diagnostics:
         yield diagnostics
 
@@ -284,7 +298,10 @@ def _run(provider, operation, attempt, *, before_attempt=None, return_statuses=(
                 error.reason_code == "http_error" and error.http_status in _RETRY_STATUS)
             if not retryable or index + 1 >= budget.max_attempts:
                 break
-            delay = max(0.5 * 2 ** index + 0.25 * budget.random_fn(), retry_after)
+            raw_delay = budget.base_backoff * (2 ** index) + budget.jitter * budget.random_fn()
+            if budget.max_backoff is not None:
+                raw_delay = min(budget.max_backoff, raw_delay)
+            delay = max(raw_delay, retry_after)
             try:
                 _wait(budget, delay)
             except SourceFetchError:

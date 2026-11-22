@@ -1,20 +1,20 @@
 """CFTC Commitments of Traders data source.
 
-Fetches the same public annual COT archives as `cot_reports`, with bounded
-status-aware transport and in-memory parsing. No API key is needed.
+Fetches official public annual CFTC COT ZIP archives directly with bounded
+status-aware transport and in-memory parsing. No API key or HTML scraping needed.
 """
 
 from __future__ import annotations
 
 import base64
+from datetime import date, datetime, time as daytime, timedelta
 import io
-import hashlib
 import logging
-import re
 import time
 import zipfile
 import zlib
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -27,90 +27,34 @@ logger = logging.getLogger(__name__)
 
 MAX_ARCHIVE_BYTES = 16 * 1024 * 1024
 MAX_REPORT_BYTES = 64 * 1024 * 1024
-RELEASE_SCHEDULE_URL = 'https://www.cftc.gov/MarketReports/CommitmentsofTraders/ReleaseSchedule/index.htm'
+MAX_COT_AGE_DAYS = 14
 
 
-def _publication_scope(as_of: str, assessed_at: str) -> dict:
-    """Bind admission to the publisher's current calendar, including holidays.
-
-    CFTC publishes Tuesday observations at 15:30 Eastern on its listed release
-    dates. Never infer an unlisted previous-year date or a fixed age allowance.
-    The schedule is tentative: a delayed/missing release stays unavailable until
-    its official calendar and the acquired report agree.
-    """
-    from datetime import date, datetime, time as daytime, timedelta
-    from zoneinfo import ZoneInfo
-    from bs4 import BeautifulSoup
+def _zip_freshness_scope(as_of: str, assessed_at: str) -> dict[str, Any]:
+    """Derive expected COT Tuesday cutoff & freshness window without HTML scraping."""
     assessed = datetime.fromisoformat(assessed_at)
-    eastern = ZoneInfo('America/New_York')
+    eastern = ZoneInfo("America/New_York")
     if assessed.utcoffset() is None:
-        raise SourceFetchError('CFTC acquisition clock invalid', reason_code='invalid_response')
+        raise SourceFetchError("CFTC acquisition clock invalid", reason_code="invalid_response")
     cutoff = min(assessed, datetime.combine(date.fromisoformat(as_of), daytime.max, eastern))
-    provider_timeout('cftc')
-    response = provider_request('cftc', 'GET', RELEASE_SCHEDULE_URL,
-        operation='release_schedule', transport=_archive_get)
-    try:
-        body = response.content
-        soup = BeautifulSoup(body, 'html.parser')
-        provider_timeout('cftc')
-        releases = []
-        years = set()
-        months = {date(2000, month, 1).strftime('%B'): month for month in range(1, 13)}
-        for table in soup.find_all('table'):
-            provider_timeout('cftc')
-            heading = table.find_previous(['h2', 'h3', 'h4'])
-            match = re.fullmatch(r'(\d{4}) Release Schedule', heading.get_text(' ', strip=True)) if heading else None
-            if match is None:
-                continue
-            year = int(match[1])
-            if year in years:
-                raise ValueError('duplicate calendar')
-            years.add(year)
-            seen_months = set()
-            table_observations = []
-            for row in table.find_all('tr'):
-                provider_timeout('cftc')
-                cells = [cell.get_text(' ', strip=True) for cell in row.find_all(['td', 'th'])]
-                if not cells or cells[0] == 'Month':
-                    continue
-                month = months[cells[0]]
-                if month in seen_months:
-                    raise ValueError('duplicate month')
-                seen_months.add(month)
-                days = [cell.rstrip('*').strip() for cell in cells[1:] if cell.strip()]
-                if not days or any(not re.fullmatch(r'\d{1,2}', day) for day in days):
-                    raise ValueError('invalid calendar day')
-                for day in days:
-                    release_day = date(year, month, int(day))
-                    # Friday plus publisher-listed Monday/Tuesday holiday delays.
-                    if release_day.weekday() not in (0, 1, 4):
-                        raise ValueError('unsupported release weekday')
-                    release_at = datetime.combine(release_day, daytime(15, 30), eastern)
-                    friday = release_day - timedelta(days=(release_day.weekday() - 4) % 7)
-                    observation = friday - timedelta(days=3)
-                    table_observations.append(observation)
-                    releases.append((release_at, observation.isoformat()))
-            ordered = sorted(table_observations)
-            if (seen_months != set(range(1, 13)) or not 50 <= len(ordered) <= 54
-                    or any(right - left != timedelta(days=7) for left, right in zip(ordered, ordered[1:]))):
-                raise ValueError('incomplete calendar')
-        if cutoff.astimezone(eastern).year not in years or len({r[0] for r in releases}) != len(releases):
-            raise ValueError('calendar unavailable')
-        eligible = [release for release in releases if release[0] <= cutoff]
-        if not eligible:
-            raise ValueError('prior calendar unavailable')
-        release_at, observation = max(eligible)
-        result = {'mode': 'official_publication_calendar', 'expected_observation_date': observation,
-            'expected_release_at': release_at.isoformat(), 'release_schedule_url': RELEASE_SCHEDULE_URL,
-            'release_schedule_sha256': hashlib.sha256(body).hexdigest(),
-            'release_schedule_acquired_at': acquisition_time(), 'publication_cutoff': cutoff.isoformat(),
-            'publication_assessed_at': assessed_at}
-        provider_timeout('cftc')
-        return result
-    except (ValueError, KeyError, TypeError, OverflowError):
-        raise SourceFetchError('CFTC publication calendar unavailable or invalid', reason_code='invalid_response') from None
-    finally:
-        response.close()
+    cutoff_et = cutoff.astimezone(eastern)
+    cutoff_day = cutoff_et.date()
+    days_since_friday = (cutoff_day.weekday() - 4) % 7
+    last_friday = cutoff_day - timedelta(days=days_since_friday)
+    release_at = datetime.combine(last_friday, daytime(15, 30), eastern)
+    if cutoff_et < release_at:
+        last_friday -= timedelta(days=7)
+        release_at = datetime.combine(last_friday, daytime(15, 30), eastern)
+    expected_tuesday = last_friday - timedelta(days=3)
+    return {
+        "mode": "zip_date_freshness",
+        "expected_observation_date": expected_tuesday.isoformat(),
+        "expected_release_at": release_at.isoformat(),
+        "max_age_days": MAX_COT_AGE_DAYS,
+        "cutoff_date": cutoff_day.isoformat(),
+        "publication_cutoff": cutoff.isoformat(),
+        "publication_assessed_at": assessed_at,
+    }
 
 
 def _archive_get(url: str, **options) -> requests.Response:
@@ -207,13 +151,7 @@ class CFTCSource:
             return {"error": f"{method} fetch failed"}
 
     def is_available(self) -> bool:
-        try:
-            import cot_reports  # noqa: F401
-
-            return True
-        except ImportError:
-            logger.info("cot_reports not installed — run: pip install cot_reports")
-            return False
+        return True
 
     def _fetch_raw_report(
         self, report_type: str = "disaggregated_futures", *, lookback_weeks: int = 52, as_of: str | None = None,
@@ -308,11 +246,14 @@ class CFTCSource:
             failures["cot_report"] = exc.reason_code
         acquired_at = df.attrs.get("acquired_at") or acquisition_time()
         provider_timeout('cftc')
-        # A cached archive keeps its actual acquisition lineage, but must meet
-        # the release requirements of this call, not its old cache clock.
-        coverage = _publication_scope(params.get('as_of') or current_session_date(), acquisition_time())
+        # Validate freshness directly from the observation dates inside the ZIP.
+        coverage = _zip_freshness_scope(params.get('as_of') or current_session_date(), acquisition_time())
         coverage['archive_acquired_at'] = acquired_at
         expected_date = coverage['expected_observation_date']
+        cutoff_day = date.fromisoformat(coverage['cutoff_date'])
+        release_at = datetime.fromisoformat(coverage['expected_release_at'])
+        acquired_dt = datetime.fromisoformat(acquired_at)
+        date_col = 'As_of_Date_in_Form_YYYY-MM-DD' if 'As_of_Date_in_Form_YYYY-MM-DD' in df.columns else COL_DATE
         for commodity in commodities:
             provider_timeout('cftc')
             code = COMMODITY_CODES.get(commodity)
@@ -327,13 +268,20 @@ class CFTCSource:
                 failures[commodity] = "invalid_response"
                 continue
 
-            commodity_df["date"] = pd.to_datetime(commodity_df[COL_DATE])
-            commodity_df = commodity_df[commodity_df[COL_DATE].astype(str).str[:10] <= expected_date]
+            commodity_df["date"] = pd.to_datetime(commodity_df[date_col])
+            commodity_df = commodity_df[commodity_df[date_col].astype(str).str[:10] <= expected_date]
             commodity_df = commodity_df.sort_values("date")
             commodity_df = commodity_df.tail(lookback_weeks)
             provider_timeout('cftc')
 
-            if len(commodity_df) < lookback_weeks or commodity_df.iloc[-1]['date'].date().isoformat() != expected_date:
+            if len(commodity_df) < lookback_weeks:
+                failures[commodity] = "invalid_response"
+                continue
+            latest_obs_date = commodity_df.iloc[-1]['date'].date()
+            if (cutoff_day - latest_obs_date).days > MAX_COT_AGE_DAYS:
+                failures[commodity] = "invalid_response"
+                continue
+            if acquired_dt < release_at and latest_obs_date.isoformat() != expected_date:
                 failures[commodity] = "invalid_response"
                 continue
 

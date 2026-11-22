@@ -85,8 +85,8 @@ def _universe_decision(universe, strategy, candidate, filing_corpus=None):
         membership = None
         decision = universe.decision(candidate.ticker)
         if strategy == 'govt_contracts' and candidate.ticker == '':
-            from ..data_sources.award_identity import resolve_award_issuer
-            attribution = resolve_award_issuer(candidate.metadata)
+            from .govt_contracts import resolve_govt_contract_issuer
+            attribution = resolve_govt_contract_issuer(candidate.metadata)
             if (attribution.get('status') == 'verified_no_listed_target'
                     and attribution == candidate.metadata.get('issuer_attribution')):
                 ownership = attribution

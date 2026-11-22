@@ -25,7 +25,9 @@ def freeze(monkeypatch, value):
         @classmethod
         def now(cls, tz=None):
             return instant.astimezone(tz) if tz else instant.replace(tzinfo=None)
+    from tradingagents.strategies.orchestration import data_acquisition as da_module
     monkeypatch.setattr(engine_module, 'datetime', FixedDatetime)
+    monkeypatch.setattr(da_module, 'datetime', FixedDatetime)
     return instant
 
 

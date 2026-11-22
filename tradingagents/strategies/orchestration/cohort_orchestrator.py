@@ -283,10 +283,7 @@ class CohortOrchestrator:
         self.cohorts: list[dict[str, Any]] = []
         if base_config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("CohortOrchestrator is paper-only")
-        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
-        strategies = configure_strategies(get_paper_trade_strategies(), ar_config)
-        from .bounded_document_inputs import configure_strategies as configure_document_strategies
-        strategies = configure_document_strategies(strategies, ar_config)
+        strategies = list(get_paper_trade_strategies())
         from .operating_contract import configure_strategies as stabilization_strategies
         strategies = stabilization_strategies(strategies, ar_config, full_config=base_config)
         from .source_lifecycle_policy import configured as lifecycle_configured
@@ -343,11 +340,32 @@ class CohortOrchestrator:
             if not isinstance(policy_id, str) or not policy_id.strip():
                 raise ValueError("policy_id must be non-empty text")
             policy_ids[cfg.name] = policy_id.strip()
+        from tradingagents.strategies.orchestration.data_acquisition import (
+            DataAcquisitionService,
+        )
+        from tradingagents.strategies.orchestration._io import (
+            COHORT_HORIZONS,
+            COHORT_SIZES,
+        )
+        from tradingagents.strategies.state.generation_db import GenerationDB
+        import inspect
+
+        base_state_dir = Path(
+            base_config.get("autoresearch", {}).get("state_dir", "data/state")
+        )
+        ledger_params = list(inspect.signature(PortfolioLedger.__init__).parameters.values())[1:]
+        use_unified_db = bool(ledger_params and "db" in ledger_params[0].name)
+        self.generation_db: GenerationDB | None = (
+            GenerationDB.for_state_dir(base_state_dir) if use_unified_db else None
+        )
+        # Single shared Tier-2 DataAcquisitionService instantiated ONCE per run (not 16x).
+        self.data_acquisition = DataAcquisitionService(base_config)
+
         metric_store = MetricStore(
-            Path(base_config.get("autoresearch", {}).get("state_dir", "data/state"))
-            / "metrics_v2.sqlite3"
+            self.generation_db if self.generation_db is not None else (base_state_dir / "metrics_v2.sqlite3")
         )
         self._metric_store = metric_store
+        state_accepts_db = "db" in inspect.signature(StateManager.__init__).parameters
 
         for cfg in cohort_configs:
             cohort_config = copy.deepcopy(base_config)
@@ -373,21 +391,27 @@ class CohortOrchestrator:
             )
 
             ledger = PortfolioLedger(
-                Path(cfg.state_dir) / "portfolio.db",
+                self.generation_db
+                if self.generation_db is not None
+                else (Path(cfg.state_dir) / "portfolio.db"),
                 cfg.name,
                 Decimal(str(profile.total_capital)),
                 paper_ledger_config=cohort_config["autoresearch"].get("paper_ledger"),
                 short_selling_config=cohort_config["autoresearch"].get("short_selling"),
             )
 
-            state = StateManager(cfg.state_dir)
+            state = (
+                StateManager(cfg.state_dir, db=self.generation_db)
+                if state_accepts_db
+                else StateManager(cfg.state_dir)
+            )
             engine = MultiStrategyEngine(
                 config=cohort_config,
                 strategies=strategies,
                 state_manager=state,
                 use_llm=cfg.use_llm,
-                adaptive_confidence=False,
                 ledger=ledger,
+                data_acquisition=self.data_acquisition,
             )
             executor = SessionExecutor(
                 ledger,
@@ -435,17 +459,20 @@ class CohortOrchestrator:
         self._after_gap_p0_invalidation = lambda marker: None
         self._after_gap_metric_invalidation = lambda marker: None
 
-        # OpenBB availability check — warn loudly if unavailable
+        # Optional enrichment availability check (supports new `enrichment` or legacy `openbb`)
         first_engine = self.cohorts[0]["engine"] if self.cohorts else None
-        openbb_source = first_engine.registry.get("openbb") if first_engine else None
-        if openbb_source is not None and openbb_source.is_available():
+        enrichment_source = (
+            (first_engine.registry.get("enrichment") or first_engine.registry.get("openbb"))
+            if first_engine
+            else None
+        )
+        if enrichment_source is not None and enrichment_source.is_available():
             self.openbb_degraded = False
-            logger.info("OpenBB: available — sector enforcement and enrichment active")
+            logger.info("Enrichment source: available — sector enforcement and enrichment active")
         else:
             self.openbb_degraded = True
             logger.warning(
-                "OpenBB: UNAVAILABLE — sector enforcement disabled, enrichment skipped. "
-                "Install with: pip install -e '[.openbb]' and set FMP_API_KEY"
+                "Enrichment source: UNAVAILABLE — optional enrichment skipped (Tier-2 isolated)"
             )
 
     def _policy_id_for_horizon(self, horizon: str) -> str:
@@ -502,6 +529,15 @@ class CohortOrchestrator:
         )
         return False
 
+    @staticmethod
+    def _cohort_recovery_binding(ledger: Any) -> str:
+        from tradingagents.strategies.execution.ids import stable_id
+
+        hook = getattr(ledger, "recovery_binding_id", None)
+        if callable(hook):
+            return hook()
+        return stable_id("cohort_binding", ledger.cohort_id, str(ledger.path))
+
     def _bound_critical_gap_cohorts(
         self, marker: CriticalGapMarker
     ) -> list[dict[str, Any]]:
@@ -512,7 +548,7 @@ class CohortOrchestrator:
         seen_bindings: set[str] = set()
         for cohort in self.cohorts:
             name = cohort["config"].name
-            binding = cohort["ledger"].recovery_binding_id()
+            binding = self._cohort_recovery_binding(cohort["ledger"])
             if name in current or binding in seen_bindings:
                 raise ValueError("critical gap cohort binding is duplicated")
             if cohort["ledger"].cohort_id != name:
@@ -656,7 +692,7 @@ class CohortOrchestrator:
         store = self._metric_store
         try:
             affected_cohorts = {
-                cohort["config"].name: cohort["ledger"].recovery_binding_id()
+                cohort["config"].name: self._cohort_recovery_binding(cohort["ledger"])
                 for cohort in self.cohorts
             }
             minimal_marker = CriticalGapMarker(
@@ -961,79 +997,56 @@ class CohortOrchestrator:
         return stage_daily_results(state)
 
     def _fetch_openbb_enrichment(self, signals: list[dict]) -> dict:
-        """Fetch OpenBB data to enrich portfolio committee decisions.
+        """Fetch optional Tier-2 enrichment (profiles, short interest, Ken French factors).
 
-        Returns dict with profiles, short_interest, factors for signal tickers.
+        Under Tier-2 fault isolation, failures in any optional enrichment are
+        recorded in ``errors`` and never abort cohort execution or staging.
         """
-        from .enrichment_capabilities import configured, declaration
-        from tradingagents.strategies.modules.commodity_macro import ETF_TO_FUTURES_UNDERLYING
-        ar = getattr(self, '_base_config', {}).get('autoresearch', {})
-        retired_curves = configured(ar)
         tickers = sorted({s.get("ticker", "") for s in signals if s.get("ticker")})
-        enrichment: dict[str, Any] = declaration(ar, {
-            ETF_TO_FUTURES_UNDERLYING[ticker] for ticker in tickers if ETF_TO_FUTURES_UNDERLYING.get(ticker)})
+        enrichment: dict[str, Any] = {}
         if not tickers:
             return enrichment
 
         first_engine = self.cohorts[0]["engine"]
         registry = getattr(first_engine, "registry", None)
-        if registry is None:
-            if retired_curves:
-                enrichment['errors'] = {'openbb': {'reason_code': 'provider_error',
-                    'error': 'OpenBB enrichment unavailable'}}
-            return enrichment
-
-        openbb_source = registry.get("openbb")
+        openbb_source = (
+            (registry.get("enrichment") or registry.get("openbb"))
+            if registry is not None
+            else None
+        )
         if openbb_source is None or not openbb_source.is_available():
-            if retired_curves:
-                enrichment['errors'] = {'openbb': {'reason_code': 'provider_error',
-                    'error': 'OpenBB enrichment unavailable'}}
             return enrichment
 
-        # Native profile batches preserve every ticker and explicit failures.
-        errors = {}
-        profile_batch = openbb_source.fetch_profiles(tickers)
-        profiles = profile_batch["profiles"]
-        if profile_batch["errors"]:
-            errors["profiles"] = profile_batch["errors"]
-        if profiles:
-            enrichment["profiles"] = profiles
+        errors: dict[str, Any] = {}
+        try:
+            profile_batch = openbb_source.fetch_profiles(tickers)
+            profiles = profile_batch.get("profiles", {})
+            if profile_batch.get("errors"):
+                errors["yfinance_profile"] = profile_batch["errors"]
+            if profiles:
+                enrichment["profiles"] = profiles
+        except Exception as exc:
+            errors["yfinance_profile"] = {"status": "unavailable", "error": str(exc)}
 
-        # Native preparation and a complete read snapshot serve every exact symbol.
-        short_batch = openbb_source.fetch_short_interest(tickers)
-        if short_batch["short_interest"]:
-            enrichment["short_interest"] = short_batch["short_interest"]
-        if short_batch["errors"]:
-            errors["short_interest"] = short_batch["errors"]
-        enrichment["short_interest_acquisition"] = short_batch["acquisition"]
+        try:
+            short_batch = openbb_source.fetch_short_interest(tickers)
+            if short_batch.get("short_interest"):
+                enrichment["short_interest"] = short_batch["short_interest"]
+            if short_batch.get("errors"):
+                errors["finra_short_interest"] = short_batch["errors"]
+            if "acquisition" in short_batch:
+                enrichment["short_interest_acquisition"] = short_batch["acquisition"]
+        except Exception as exc:
+            errors["finra_short_interest"] = {"status": "unavailable", "error": str(exc)}
 
-        # Fetch Fama-French factors (once, not per ticker)
-        factors = openbb_source.fetch({"method": "factors_fama_french"})
-        if "error" not in factors:
-            enrichment["factors"] = factors.get("factors", {})
-        else:
-            errors["factors"] = factors
-
-        # Fetch commodity futures curves for commodity signals
-        commodity_tickers = [t for t in tickers if t in ETF_TO_FUTURES_UNDERLYING]
-        if commodity_tickers and not retired_curves:
-            curves = {}
-            for ticker in commodity_tickers:
-                underlying = ETF_TO_FUTURES_UNDERLYING.get(ticker)
-                if underlying is None:
-                    continue
-                result = openbb_source.fetch(
-                    {
-                        "method": "commodity_futures_curve",
-                        "symbol": underlying,
-                    }
-                )
-                if "error" not in result:
-                    curves[underlying] = result
-                else:
-                    errors.setdefault("commodity_futures_curves", {})[underlying] = result
-            if curves:
-                enrichment["commodity_futures_curves"] = curves
+        try:
+            factors = openbb_source.fetch({"method": "factors_fama_french"})
+            if isinstance(factors, dict) and "error" not in factors:
+                enrichment["factors"] = factors.get("factors", {})
+            else:
+                errors["ken_french"] = factors
+        except Exception as exc:
+            errors["ken_french"] = {"status": "unavailable", "error": str(exc)}
 
         if errors:
             enrichment["errors"] = errors
@@ -1053,12 +1066,12 @@ def build_default_cohorts(base_config: dict) -> list[CohortConfig]:
     Produces one cohort for each combination of 4 horizons x 4 portfolio sizes.
     All cohorts use the fail-closed production learning policy.
     """
+    from tradingagents.strategies.orchestration._io import COHORT_HORIZONS, COHORT_SIZES
+
     base_state_dir = base_config.get("autoresearch", {}).get("state_dir", "data/state")
-    horizons = ["30d", "3m", "6m", "1y"]
-    sizes = ["5k", "10k", "50k", "100k"]
     cohorts: list[CohortConfig] = []
-    for h in horizons:
-        for s in sizes:
+    for h in COHORT_HORIZONS:
+        for s in COHORT_SIZES:
             name = f"horizon_{h}_size_{s}"
             cohorts.append(
                 CohortConfig(

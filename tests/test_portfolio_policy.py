@@ -80,15 +80,11 @@ def test_size_profile_policy_limits_match_approved_table() -> None:
 def test_policy_config_is_versioned_and_options_are_inactive() -> None:
     policy = DEFAULT_CONFIG["autoresearch"]["portfolio_policy"]
 
-    assert policy["version"] == "portfolio_policy_v1"
+    assert policy["version"] == "portfolio_policy_v2"
     assert policy["volatility_lookback_sessions"] == 60
     assert policy["annualized_volatility_floor"] == 0.15
-    assert policy["congressional_exposure_by_size"] == {
-        "5k": 0.25,
-        "10k": 0.20,
-        "50k": 0.15,
-        "100k": 0.12,
-    }
+    assert policy["max_open_chase_pct"] == 0.05
+    assert "congressional_exposure_by_size" not in policy
     assert policy["options_overlays_enabled"] is False
 
 
@@ -269,9 +265,10 @@ def test_policy_config_factory_uses_every_profile_limit(size: str) -> None:
         profile.max_position_risk_contribution_pct
     )
     assert config.max_correlated_shorts == profile.max_correlated_shorts
-    assert config.congressional_exposure_pct == settings[
-        "congressional_exposure_by_size"
-    ][size]
+    assert config.short_eligible is profile.short_eligible
+    assert config.max_open_chase_pct == pytest.approx(settings["max_open_chase_pct"])
+    assert not hasattr(config, "congressional_exposure_pct")
+    assert not hasattr(config, "risk_contribution_min_positions")
     assert config.version == settings["version"]
 
 
@@ -464,33 +461,10 @@ def test_policy_applies_event_cluster_cap_independently() -> None:
     assert [item.position_size_pct for item in accepted] == pytest.approx([0.01])
 
 
-def test_policy_applies_congressional_cap_independently() -> None:
-    existing = _position(
-        "AAPL",
-        0.10,
-        sector="Consumer",
-        strategies=("congressional_trades",),
-        risks=("member:old",),
-    )
-    recommendation = _recommendation(
-        "MSFT",
-        0.08,
-        strategies=("congressional_trades",),
-        risks=("member:new",),
-    )
-
-    accepted = PortfolioPolicy().apply(
-        [recommendation],
-        _context(positions=(existing,), sectors={"MSFT": "Technology"}),
-    )
-
-    assert [item.position_size_pct for item in accepted] == pytest.approx([0.02])
-
-
-def test_policy_enforces_generic_and_congressional_caps_from_factory_profile() -> None:
+def test_policy_enforces_generic_strategy_caps_without_congressional_key() -> None:
     config = _policy_config("100k")
     assert config.max_strategy_exposure_pct == pytest.approx(0.20)
-    assert config.congressional_exposure_pct == pytest.approx(0.12)
+    assert config.max_open_chase_pct == pytest.approx(0.05)
 
     generic_accepted = PortfolioPolicy().apply(
         [_recommendation("MSFT", 0.08, strategies=("earnings_call",))],
@@ -506,26 +480,9 @@ def test_policy_enforces_generic_and_congressional_caps_from_factory_profile() -
             sectors={"MSFT": "Technology"},
         ),
     )
-    congressional_accepted = PortfolioPolicy().apply(
-        [_recommendation("NVDA", 0.08, strategies=("congressional_trades",))],
-        _context(
-            positions=(
-                _position(
-                    "AAPL",
-                    0.08,
-                    strategies=("congressional_trades",),
-                    risks=("congressional:old",),
-                ),
-            ),
-            sectors={"NVDA": "Technology"},
-        ),
-    )
 
     assert [item.position_size_pct for item in generic_accepted] == pytest.approx(
         [0.02]
-    )
-    assert [item.position_size_pct for item in congressional_accepted] == pytest.approx(
-        [0.04]
     )
 
 
@@ -568,7 +525,8 @@ def test_policy_counts_current_pending_and_prior_acceptances_in_order() -> None:
     )
 
 
-def test_position_risk_contribution_waits_for_four_positions_then_caps() -> None:
+def test_continuous_inverse_volatility_sizing_applies_from_position_one() -> None:
+    """No 4-position cliff: inverse-vol scaling applies smoothly from position #1."""
     positions = tuple(
         _position(
             f"T{i}",
@@ -576,20 +534,20 @@ def test_position_risk_contribution_waits_for_four_positions_then_caps() -> None
             sector=f"Sector-{i}",
             strategies=(f"strategy-{i}",),
             risks=(f"risk-{i}",),
-            volatility=0.05,
+            volatility=0.15,
         )
         for i in range(3)
     )
     recommendation = _recommendation("MSFT", 0.08)
-    before_activation = PortfolioPolicy().apply(
+    at_position_one = PortfolioPolicy().apply(
         [recommendation],
         _context(
-            positions=positions[:2],
+            positions=(),
             sectors={"MSFT": "Technology"},
             volatility={"MSFT": 0.60},
         ),
     )
-    after_activation = PortfolioPolicy().apply(
+    at_position_four = PortfolioPolicy().apply(
         [recommendation],
         _context(
             positions=positions,
@@ -598,12 +556,9 @@ def test_position_risk_contribution_waits_for_four_positions_then_caps() -> None
         ),
     )
 
-    assert before_activation[0].position_size_pct == pytest.approx(0.08)
-    accepted_weight = after_activation[0].position_size_pct
-    base_risk = 3 * 0.05 * 0.15
-    candidate_risk = accepted_weight * 0.60
-    assert candidate_risk / (candidate_risk + base_risk) <= 0.25 + 1e-9
-    assert accepted_weight == pytest.approx(0.0125)
+    # 100k max_position_pct=0.08, vol_floor=0.15, sigma=0.60 -> cap = 0.08 * (0.15 / 0.60) = 0.02
+    assert at_position_one[0].position_size_pct == pytest.approx(0.02)
+    assert at_position_four[0].position_size_pct == pytest.approx(0.02)
 
 
 @pytest.mark.parametrize("location", ["current", "pending"])

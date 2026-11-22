@@ -102,6 +102,8 @@ class PaperCostModel:
         reference_price: Decimal,
         effective_at: datetime,
         processed_at: datetime,
+        *,
+        quantity: int | None = None,
     ) -> Fill:
         if (
             not isinstance(reference_price, Decimal)
@@ -109,6 +111,9 @@ class PaperCostModel:
             or reference_price <= 0
         ):
             raise ValueError("reference_price must be a positive finite Decimal")
+        fill_qty = intent.requested_qty if quantity is None else quantity
+        if type(fill_qty) is not int or fill_qty <= 0 or fill_qty > intent.requested_qty:
+            raise ValueError("fill quantity must be a positive int <= intent.requested_qty")
         if intent.side in {"buy", "cover"}:
             direction = Decimal("1")
         elif intent.side in {"sell", "short"}:
@@ -119,7 +124,7 @@ class PaperCostModel:
             Decimal("1") + direction * self.slippage_bps / Decimal("10000")
         )
         slippage = quantize_cash(
-            abs(fill_price - reference_price) * intent.requested_qty
+            abs(fill_price - reference_price) * fill_qty
         )
         if effective_at.tzinfo is None or effective_at.utcoffset() is None:
             raise ValueError("effective_at must be timezone-aware")
@@ -128,7 +133,7 @@ class PaperCostModel:
         execution_session = effective_at.date()
         return Fill(
             stable_id(
-                "fill", intent.intent_id, execution_session, intent.requested_qty
+                "fill", intent.intent_id, execution_session, fill_qty
             ),
             intent.intent_id,
             intent.side,
@@ -137,7 +142,7 @@ class PaperCostModel:
             processed_at,
             reference_price,
             fill_price,
-            intent.requested_qty,
+            fill_qty,
             slippage,
             quantize_cash(self.commission_per_fill),
             quantize_cash(self.other_fee_per_fill),

@@ -22,54 +22,14 @@ FAMILIES = [
         ("quarter", 3),
     ),
     (
-        "insider_activity",
-        {
-            "cluster_type": "buy_cluster",
-            "filings": [{"accession_number": "0001", "owner_name": "A"}],
-        },
-        ("filings", [{"accession_number": "0002", "owner_name": "A"}]),
-    ),
-    (
-        "filing_analysis",
-        {"form_type": "8-K", "file_url": "https://sec.test/a"},
-        ("file_url", "https://sec.test/b"),
-    ),
-    (
-        "regulatory_pipeline",
-        {"document_id": "RULE-1"},
-        ("document_id", "RULE-2"),
-    ),
-    (
         "supply_chain",
         {"article_id": "NEWS-1", "headline": "Port closure"},
         ("article_id", "NEWS-2"),
     ),
     (
-        "litigation",
-        {"docket_id": "DOCKET-1", "case_name": "A v B"},
-        ("docket_id", "DOCKET-2"),
-    ),
-    (
-        "congressional_trades",
-        {
-            "trade_keys": ["house:member:2026-07-30:$15k-$50k"],
-            "cluster_direction": "long",
-        },
-        ("trade_keys", ["house:member:2026-07-31:$15k-$50k"]),
-    ),
-    (
         "govt_contracts",
         {"source": "usaspending", "award_id": "AWARD-1"},
         ("award_id", "AWARD-2"),
-    ),
-    (
-        "state_economics",
-        {
-            "source_observation_ids": ["FRED:UNRATE:2026-07-30"],
-            "window_end": "2026-07-31",
-            "regional_sector": "retail",
-        },
-        ("source_observation_ids", ["FRED:UNRATE:2026-08-03"]),
     ),
     (
         "weather_ag",
@@ -88,11 +48,6 @@ FAMILIES = [
             "commodity": "gold",
         },
         ("report_id", "CFTC:gold:2026-W32"),
-    ),
-    (
-        "quantum_readiness",
-        {"source_ids": ["filing:1", "news:1"], "basket": "pqc_vendor"},
-        ("source_ids", ["filing:1", "news:2"]),
     ),
 ]
 
@@ -198,50 +153,6 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                 ]
             }
         },
-        "insider_activity": {
-            "edgar": {
-                "form4": {
-                    "AAPL": [
-                        {
-                            "accession_number": f"FORM4-{ordinal}",
-                            "transaction_type": "buy", "transaction_code": "P",
-                            "acquired_disposed": "A", "open_market": True,
-                            "owner_name": f"Owner {ordinal}",
-                            "shares": 10,
-                            "price_per_share": 100,
-                            "filing_date": "2026-06-30",
-                        }
-                        for ordinal in range(3)
-                    ]
-                }
-            }
-        },
-        "filing_analysis": {
-            "edgar": {
-                "filings": [
-                    {
-                        "ticker": "AAPL",
-                        "form_type": "8-K",
-                        "entity_name": "Apple Inc.",
-                        "file_date": "2026-06-30",
-                        "adsh": "EDGAR-8K-1",
-                        "current_text": "Material agreement.",
-                    }
-                ]
-            }
-        },
-        "regulatory_pipeline": {
-            "regulations": {
-                "proposed_rules": [
-                    {
-                        "document_id": "RULE-1",
-                        "title": "New standard",
-                        "agency_id": "SEC",
-                        "posted_date": "2026-06-30",
-                    }
-                ]
-            }
-        },
         "supply_chain": {
             "finnhub": {
                 "disruption_news": [
@@ -252,44 +163,6 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                         "url": "https://example.test/news/1",
                         "published_at": "2026-07-01T12:00:00+00:00",
                     }
-                ]
-            }
-        },
-        "litigation": {
-            "courtlistener": {
-                "dockets": [
-                    {
-                        "docket_id": "DOCKET-1",
-                        "case_name": "Securities class action",
-                        "nature_of_suit": "securities",
-                        "date_filed": "2026-06-30",
-                    }
-                ]
-            }
-        },
-        "congressional_trades": {
-            "congress": {
-                "recent_trades": [
-                    {
-                        "ticker": "AAPL",
-                        "transaction_type": "purchase",
-                        "amount": "$15,001 - $50,000",
-                        "representative": "Member One",
-                        "chamber": "house",
-                        "transaction_date": "2026-06-25",
-                        "source_url": "https://example.test/disclosure/1",
-                        "publication_date": "2026-06-30",
-                    },
-                    {
-                        "ticker": "AAPL",
-                        "transaction_type": "purchase",
-                        "amount": "$15,001 - $50,000",
-                        "representative": "Member Two",
-                        "chamber": "house",
-                        "transaction_date": "2026-06-25",
-                        "source_url": "https://example.test/disclosure/2",
-                        "publication_date": "2026-06-30",
-                    },
                 ]
             }
         },
@@ -313,17 +186,6 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                 }
             }
         },
-        "state_economics": {
-            "yfinance": {"prices": prices("KRE", "IWN")},
-            "fred": {
-                "UNRATE": pd.Series(
-                    [4.1, 4.0], index=pd.to_datetime(["2026-05-01", "2026-06-01"])
-                ),
-                "ICSA": pd.Series(
-                    [220000, 210000], index=pd.to_datetime(["2026-06-20", "2026-06-27"])
-                ),
-            },
-        },
         "weather_ag": {
             "yfinance": {"prices": prices("CORN", "WEAT", "SOYB")},
             "drought_monitor": {
@@ -341,20 +203,7 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                     "report_id": "CFTC:088691:2026-06-26",
                     "window_end": "2026-06-26",
                 }
-            }
-        },
-        "quantum_readiness": {
-            "finnhub": {
-                "pqc_news": [
-                    {
-                        "symbol": "CRWD",
-                        "headline": "Quantum milestone and PQC deadline",
-                        "summary": "quantum-safe migration",
-                        "url": "https://example.test/pqc/1",
-                        "published_at": "2026-07-01T12:00:00+00:00",
-                    }
-                ]
-            }
+            },
         },
     }
 
@@ -377,3 +226,30 @@ def test_all_active_strategy_outputs_carry_usable_source_native_identity():
                 date(2026, 7, 1),
             )
             assert canonical_observation_time(name, candidate.metadata)
+
+
+def test_earnings_calendar_observed_at_uses_causal_xnys_boundaries():
+    from tradingagents.strategies.orchestration.event_identity import (
+        canonical_observation_time,
+        earnings_calendar_observed_at,
+    )
+    from tradingagents.strategies.orchestration.trading_calendar import (
+        session_close,
+        session_open,
+    )
+
+    session = date(2026, 11, 20)
+    assert earnings_calendar_observed_at("2026-11-20", "bmo") == session_open(session)
+    assert earnings_calendar_observed_at("2026-11-20", "amc") == session_close(session)
+    assert earnings_calendar_observed_at("2026-11-20", "dmh") == session_close(session)
+    assert earnings_calendar_observed_at("2026-11-20", "") == session_close(session)
+    # Non-trading day stays causally on report_date rather than backdating.
+    weekend = earnings_calendar_observed_at("2026-11-21", "amc")
+    assert weekend == datetime(2026, 11, 21, 21, 0, tzinfo=timezone.utc)
+    # Direct metadata fallback on report_date + hour works in canonical_observation_time.
+    assert (
+        canonical_observation_time(
+            "earnings_call", {"report_date": "2026-11-20", "hour": "bmo"}
+        )
+        == session_open(session)
+    )

@@ -99,62 +99,28 @@ def build_default_registry(config: dict[str, Any] | None = None) -> DataSourceRe
         raise ValueError('invalid_noaa_delivery_policy')
 
     from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
-    from tradingagents.strategies.data_sources.edgar_source import EDGARSource
     from tradingagents.strategies.data_sources.usaspending_source import USASpendingSource
-    from tradingagents.strategies.data_sources.congress_source import CongressSource
     from tradingagents.strategies.data_sources.fred_source import FREDSource
     from tradingagents.strategies.data_sources.finnhub_source import FinnhubSource
-    from tradingagents.strategies.data_sources.regulations_source import RegulationsSource
-    from tradingagents.strategies.data_sources.courtlistener_source import CourtListenerSource
+    from tradingagents.strategies.data_sources.noaa_yearly_source import NOAAYearlySource
+    from tradingagents.strategies.data_sources.usda_source import USDASource
+    from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
+    from tradingagents.strategies.data_sources.cftc_source import CFTCSource
+    from tradingagents.strategies.data_sources.enrichment_source import EnrichmentSource
 
     registry = DataSourceRegistry()
 
     registry.register(YFinanceSource())
-
-    edgar_ua = config.get("edgar_user_agent", "TradingAgents research@example.com")
-    registry.register(EDGARSource(user_agent=edgar_ua))
-
-    registry.register(USASpendingSource())
-    congress_options = ({'disclosure_policy': config['congress_disclosure_policy']}
-                        if config.get('congress_disclosure_policy') is not None else {})
-    registry.register(CongressSource(fmp_api_key=config.get("fmp_api_key"), **congress_options))
-
-    # API-key sources (free keys)
-    registry.register(FREDSource(api_key=config.get("fred_api_key")))
     registry.register(FinnhubSource(
         api_key=config.get("finnhub_api_key"),
         reliability_config=config.get("finnhub_reliability"),
     ))
-    registry.register(RegulationsSource(api_key=config.get("regulations_api_key")))
-    registry.register(CourtListenerSource(token=config.get("courtlistener_token")))
-
-    if config.get('noaa_delivery_policy') == 'ghcnd_yearly_v1':
-        from tradingagents.strategies.data_sources.noaa_yearly_source import NOAAYearlySource
-        registry.register(NOAAYearlySource())
-    else:
-        from tradingagents.strategies.data_sources.noaa_source import NOAASource
-        registry.register(NOAASource(token=config.get("noaa_cdo_token")))
-
-    from tradingagents.strategies.data_sources.usda_source import USDASource
+    registry.register(USASpendingSource())
+    registry.register(NOAAYearlySource())
     registry.register(USDASource(api_key=config.get("usda_nass_api_key")))
-
-    from tradingagents.strategies.data_sources.drought_monitor_source import DroughtMonitorSource
     registry.register(DroughtMonitorSource())
-
-    # OpenBB Platform (optional — graceful skip if not installed)
-    try:
-        from tradingagents.strategies.data_sources.openbb_source import OpenBBSource
-
-        registry.register(OpenBBSource(fmp_api_key=config.get("fmp_api_key")))
-    except ImportError:
-        logger.info("openbb not installed — OpenBBSource skipped")
-
-    # CFTC COT data (optional — graceful skip if cot_reports not installed)
-    try:
-        from tradingagents.strategies.data_sources.cftc_source import CFTCSource
-
-        registry.register(CFTCSource())
-    except ImportError:
-        logger.info("cot_reports not installed — CFTCSource skipped")
+    registry.register(CFTCSource())
+    registry.register(FREDSource(api_key=config.get("fred_api_key")))
+    registry.register(EnrichmentSource())
 
     return registry

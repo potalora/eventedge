@@ -181,7 +181,12 @@ def _build_policy(config: Mapping[str, Any], endpoint: str) -> _RetryPolicy:
 
 
 from .fetch_errors import SourceFetchError, source_fetch_error, source_text, source_date, source_number
-from .request_policy import provider_call, current_provider_deadline
+from .request_policy import (
+    current_provider_deadline,
+    provider_budget,
+    provider_call,
+    provider_subbudget,
+)
 
 
 class _FinnhubHTTPAdapter:
@@ -196,6 +201,7 @@ class _FinnhubHTTPAdapter:
         self._api_key = api_key
         self._session = session
         self._base_url = base_url.rstrip("/")
+        self.last_status_code: int | None = None
 
     def get(
         self,
@@ -204,6 +210,7 @@ class _FinnhubHTTPAdapter:
         params: Mapping[str, Any] | None = None,
         timeout: tuple[float, float],
     ) -> Any:
+        self.last_status_code = None
         query = dict(params or {})
         query["token"] = self._api_key
         response = self._session.get(
@@ -211,6 +218,7 @@ class _FinnhubHTTPAdapter:
             params=query,
             timeout=timeout,
         )
+        self.last_status_code = getattr(response, "status_code", None)
         response.raise_for_status()
         return response.json()
 
@@ -325,7 +333,7 @@ class FinnhubSource:
         endpoint: str,
         symbol: str = "",
     ) -> bool:
-        """Apply the rate delay only when enough shared scheduling budget remains."""
+        """Check remaining budget; rolling 60/min pacing is enforced by request_policy."""
         remaining = deadline - self._monotonic()
         if remaining <= _MIN_REQUEST_BUDGET_S:
             logger.warning(
@@ -336,18 +344,7 @@ class FinnhubSource:
                 symbol or "-",
             )
             return False
-        if self._rate_delay_s > 0:
-            if remaining <= self._rate_delay_s + _MIN_REQUEST_BUDGET_S:
-                logger.warning(
-                    "Finnhub request skipped strategy=%s endpoint=%s symbol=%s "
-                    "reason=workflow_deadline",
-                    strategy,
-                    endpoint,
-                    symbol or "-",
-                )
-                return False
-            self._sleep(self._rate_delay_s)
-        return self._has_budget(deadline)
+        return True
 
     @staticmethod
     def _status_code(exc: BaseException) -> int | None:
@@ -360,6 +357,8 @@ class FinnhubSource:
                 status = getattr(
                     getattr(current, "response", None), "status_code", None
                 )
+            if status is None:
+                status = getattr(current, "http_status", None)
             try:
                 if status is not None:
                     return int(status)
@@ -369,44 +368,10 @@ class FinnhubSource:
         return None
 
     @staticmethod
-    def _is_transport_error(exc: BaseException) -> bool:
-        current: BaseException | None = exc
-        seen: set[int] = set()
-        transport_types = (
-            requests.exceptions.Timeout,
-            requests.exceptions.ConnectionError,
-            Urllib3TimeoutError,
-            Urllib3ProtocolError,
-        )
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-            if isinstance(current, transport_types):
-                return True
-            current = current.__cause__ or current.__context__
-        return False
-
-    @classmethod
-    def _is_retryable(cls, exc: BaseException, policy: _RetryPolicy) -> bool:
-        status = cls._status_code(exc)
-        message = str(exc).lower()
-        if status == 429 or (
-            status is None and ("429" in message or "limit reached" in message)
-        ):
-            return True
-        if policy.retry_server_errors and status in _RETRYABLE_SERVER_STATUS_CODES:
-            return True
-        return policy.retry_transport and cls._is_transport_error(exc)
-
-    @staticmethod
     def _request_timeout(
         policy: _RetryPolicy, remaining_s: float
     ) -> tuple[float, float]:
-        """Cap inactivity timeouts to the remaining cooperative budget.
-
-        These values do not form a total request deadline. In particular,
-        requests may apply connect timeout per resolved address and read timeout
-        between received bytes.
-        """
+        """Cap inactivity timeouts to the remaining cooperative budget."""
         inactivity_cap = max(remaining_s, _MIN_REQUEST_BUDGET_S)
         return (
             min(policy.connect_timeout_s, inactivity_cap),
@@ -424,119 +389,122 @@ class FinnhubSource:
         deadline: float | None = None,
         **kwargs,
     ):
-        """Call Finnhub with an endpoint-aware transient-error policy.
-
-        Timeouts, connection errors, 429s, and retryable 5xx responses may be
-        retried. Permanent 4xx responses are re-raised immediately. The shared
-        workflow deadline is checked before every attempt and after every
-        backoff, so no follow-on request starts once it has expired.
-        """
+        """Delegate retries, backoff, and 60/min pacing to request_policy."""
         selected = policy or _RATE_LIMIT_POLICY
-        # The engine's shared policy owns retries; never nest the legacy loop.
-        shared_deadline = current_provider_deadline("finnhub")
-        if shared_deadline is not None:
-            def call():
-                options = dict(kwargs)
-                if selected.pass_timeout:
-                    options["timeout"] = self._request_timeout(selected, shared_deadline - self._monotonic())
-                return fn(*args, **options)
-            return provider_call("finnhub", endpoint or "sdk", call)
         endpoint_name = endpoint or getattr(fn, "__name__", "unknown")
         started = self._monotonic()
         effective_deadline = self._resolve_deadline(deadline)
-        last_exc: BaseException | None = None
-        attempts_made = 0
+        shared_deadline = current_provider_deadline("finnhub")
+        diagnostics: list[dict[str, Any]] = []
+        last_raw_exc: list[BaseException | None] = [None]
 
-        for attempt in range(1, selected.max_attempts + 1):
+        def attempt_fn():
+            self._http.last_status_code = None
             remaining = effective_deadline - self._monotonic()
             if remaining <= 0:
-                break
-            call_kwargs = dict(kwargs)
+                raise SourceFetchError("Finnhub acquisition deadline exhausted", reason_code="timeout")
+            options = dict(kwargs)
             if selected.pass_timeout:
-                call_kwargs["timeout"] = self._request_timeout(selected, remaining)
-            attempts_made = attempt
+                options["timeout"] = self._request_timeout(selected, remaining)
             try:
-                result = fn(*args, **call_kwargs)
-                if attempt > 1:
-                    logger.info(
-                        "Finnhub request recovered strategy=%s endpoint=%s symbol=%s "
-                        "attempt=%d/%d elapsed_s=%.3f",
-                        strategy,
-                        endpoint_name,
-                        symbol or "-",
-                        attempt,
-                        selected.max_attempts,
-                        self._monotonic() - started,
-                    )
-                return result
+                return fn(*args, **options)
             except Exception as exc:
-                last_exc = exc
+                last_raw_exc[0] = exc
                 status = self._status_code(exc)
-                elapsed = self._monotonic() - started
-                if not self._is_retryable(exc, selected):
-                    logger.error(
-                        "Finnhub request non_retryable strategy=%s endpoint=%s symbol=%s "
-                        "attempt=%d/%d status=%s error_type=%s error_message=%s "
-                        "elapsed_s=%.3f",
-                        strategy,
-                        endpoint_name,
-                        symbol or "-",
-                        attempt,
-                        selected.max_attempts,
-                        status if status is not None else "-",
-                        type(exc).__name__,
-                        self._safe_error_message(exc),
-                        elapsed,
-                    )
-                    raise
-                if attempt >= selected.max_attempts:
-                    break
+                if status is not None and not isinstance(exc, (SourceFetchError, requests.HTTPError)):
+                    raise SourceFetchError("Finnhub acquisition failed", reason_code="http_error", http_status=status) from exc
+                if status is None and ("429" in str(exc) or "limit reached" in str(exc).lower()):
+                    raise SourceFetchError("Finnhub acquisition failed", reason_code="http_error", http_status=429) from exc
+                raise
 
-                remaining = effective_deadline - self._monotonic()
-                delay = min(
-                    selected.max_backoff_s,
-                    (
-                        selected.base_backoff_s * (2 ** (attempt - 1))
-                        + self._jitter(selected.jitter_s)
-                    ),
+        try:
+            if shared_deadline is not None:
+                remaining = max(_MIN_REQUEST_BUDGET_S, effective_deadline - self._monotonic())
+                with provider_subbudget(
+                    "finnhub",
+                    maximum_seconds=remaining,
+                    absolute_deadline=effective_deadline,
+                    max_attempts=selected.max_attempts,
+                    base_backoff=selected.base_backoff_s,
+                    max_backoff=selected.max_backoff_s,
+                    jitter=selected.jitter_s,
+                ) as sub_diag:
+                    result = provider_call("finnhub", endpoint_name, attempt_fn)
+                    diagnostics = sub_diag
+            else:
+                random_fn = (
+                    (lambda: min(max(self._jitter_fn(1.0), 0.0), 1.0))
+                    if self._jitter_fn is not None
+                    else None
                 )
-                if remaining <= delay + _MIN_REQUEST_BUDGET_S:
-                    break
-                logger.warning(
-                    "Finnhub request retry strategy=%s endpoint=%s symbol=%s "
-                    "attempt=%d/%d status=%s error_type=%s error_message=%s "
-                    "delay_s=%.3f elapsed_s=%.3f",
+                with provider_budget(
+                    "finnhub",
+                    effective_deadline,
+                    clock=self._monotonic,
+                    sleep=self._sleep,
+                    random_fn=random_fn,
+                    max_attempts=selected.max_attempts,
+                    diagnostics=diagnostics,
+                    base_backoff=selected.base_backoff_s,
+                    max_backoff=selected.max_backoff_s,
+                    jitter=selected.jitter_s,
+                ):
+                    result = provider_call("finnhub", endpoint_name, attempt_fn)
+            if (
+                diagnostics
+                and diagnostics[-1].get("http_status") is None
+                and isinstance(self._http.last_status_code, int)
+            ):
+                diagnostics[-1]["http_status"] = self._http.last_status_code
+            if diagnostics and diagnostics[-1].get("recovered"):
+                recovered_status = self._status_code(last_raw_exc[0]) if last_raw_exc[0] is not None else None
+                logger.info(
+                    "Finnhub request recovered strategy=%s endpoint=%s symbol=%s "
+                    "attempt=%d/%d status=%s elapsed_s=%.3f",
                     strategy,
                     endpoint_name,
                     symbol or "-",
-                    attempt,
+                    diagnostics[-1].get("attempts", 1),
+                    selected.max_attempts,
+                    recovered_status if recovered_status is not None else "-",
+                    self._monotonic() - started,
+                )
+            return result
+        except Exception as exc:
+            raw_exc = last_raw_exc[0] or exc
+            status = self._status_code(exc) or self._status_code(raw_exc)
+            attempts_made = getattr(exc, "attempts", 0) or (diagnostics[-1].get("attempts", 1) if diagnostics else 1)
+            elapsed = self._monotonic() - started
+            safe_msg = self._safe_error_message(raw_exc)
+            if isinstance(exc, SourceFetchError) and exc.reason_code == "http_error" and status not in (429, *_RETRYABLE_SERVER_STATUS_CODES):
+                logger.error(
+                    "Finnhub request non_retryable strategy=%s endpoint=%s symbol=%s "
+                    "attempt=%d/%d status=%s error_type=%s error_message=%s elapsed_s=%.3f",
+                    strategy,
+                    endpoint_name,
+                    symbol or "-",
+                    attempts_made,
                     selected.max_attempts,
                     status if status is not None else "-",
-                    type(exc).__name__,
-                    self._safe_error_message(exc),
-                    delay,
+                    type(raw_exc).__name__,
+                    safe_msg,
                     elapsed,
                 )
-                self._sleep(delay)
-
-        if last_exc is None:
-            last_exc = TimeoutError(
-                "Finnhub request deadline elapsed before an attempt"
-            )
-        logger.error(
-            "Finnhub request exhausted strategy=%s endpoint=%s symbol=%s "
-            "attempt=%d/%d status=%s error_type=%s error_message=%s elapsed_s=%.3f",
-            strategy,
-            endpoint_name,
-            symbol or "-",
-            attempts_made,
-            selected.max_attempts,
-            self._status_code(last_exc) or "-",
-            type(last_exc).__name__,
-            self._safe_error_message(last_exc),
-            self._monotonic() - started,
-        )
-        raise last_exc
+            else:
+                logger.error(
+                    "Finnhub request exhausted strategy=%s endpoint=%s symbol=%s "
+                    "attempt=%d/%d status=%s error_type=%s error_message=%s elapsed_s=%.3f",
+                    strategy,
+                    endpoint_name,
+                    symbol or "-",
+                    attempts_made,
+                    selected.max_attempts,
+                    status if status is not None else "-",
+                    type(raw_exc).__name__,
+                    safe_msg,
+                    elapsed,
+                )
+            raise
 
     def fetch(self, params: dict[str, Any]) -> dict[str, Any]:
         method = params.get("method", "earnings_transcripts")

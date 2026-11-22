@@ -40,12 +40,59 @@ DISRUPTION_KEYWORDS = [
 ]
 
 
+# Broader liquid industrial/tech/semiconductor/logistics/supply-chain bellwethers.
+# Configurable via strategy params["supply_chain_universe"].
+DEFAULT_SUPPLY_CHAIN_UNIVERSE: tuple[str, ...] = (
+    "AAPL",
+    "TSLA",
+    "NVDA",
+    "AMZN",
+    "BA",
+    "CAT",
+    "DE",
+    "AVGO",
+    "AMD",
+    "TSM",
+    "INTC",
+    "QCOM",
+    "TXN",
+    "HON",
+    "GE",
+    "UNP",
+    "UPS",
+    "FDX",
+    "F",
+    "GM",
+    "LMT",
+    "RTX",
+    "XOM",
+    "FCX",
+    "NUE",
+)
+
+
+def get_supply_chain_universe(params: dict[str, Any] | None = None) -> list[str]:
+    """Return configured supply-chain monitoring tickers (or the default bellwether universe)."""
+    configured = (params or {}).get("supply_chain_universe")
+    if isinstance(configured, (list, tuple)):
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in configured:
+            ticker = str(raw or "").strip().upper()
+            if ticker and ticker not in seen:
+                seen.add(ticker)
+                cleaned.append(ticker)
+        if cleaned:
+            return cleaned
+    return list(DEFAULT_SUPPLY_CHAIN_UNIVERSE)
+
+
 class SupplyChainStrategy:
     """Paper-trade strategy for supply chain disruption detection."""
 
     name = "supply_chain"
     track = "paper_trade"
-    data_sources = ["finnhub", "yfinance", "openbb"]
+    data_sources = ["finnhub", "yfinance"]
 
     def get_param_space(self, horizon: str = "30d") -> dict[str, tuple]:
         from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -67,6 +114,7 @@ class SupplyChainStrategy:
         return {
             "hold_days": hp["hold_days_default"],
             "max_positions": 4,
+            "supply_chain_universe": list(DEFAULT_SUPPLY_CHAIN_UNIVERSE),
         }
 
     def screen(self, data: dict, date: str, params: dict) -> list[Candidate]:
@@ -83,9 +131,19 @@ class SupplyChainStrategy:
         if not news:
             return []
 
+        allowed_universe = (
+            set(get_supply_chain_universe(params))
+            if "supply_chain_universe" in params
+            else None
+        )
+
         candidates = []
         for article in news:
-            symbol = article.get("symbol", "")
+            symbol = str(article.get("symbol", "")).strip().upper()
+            if not symbol:
+                continue
+            if allowed_universe is not None and symbol not in allowed_universe:
+                continue
             headline = article.get("headline", "").lower()
             summary = article.get("summary", "").lower()
 
@@ -120,6 +178,7 @@ class SupplyChainStrategy:
                     date=date,
                     direction="short",  # Disruption = short affected companies
                     score=0.6,
+                    raw_signal_score=0.6,
                     metadata={
                         "headline": article.get("headline", ""),
                         "article_id": article_id,
@@ -134,24 +193,11 @@ class SupplyChainStrategy:
                 )
             )
 
-        # Amplify signal for heavily-shorted names (squeeze potential on disruption)
-        openbb_data = data.get("openbb", {})
-        short_data = openbb_data.get("short_interest", {})
-        profile_data = openbb_data.get("profile", {})
-        for candidate in candidates:
-            if isinstance(short_data, dict) and candidate.ticker in short_data:
-                si = short_data[candidate.ticker]
-                short_pct = si.get("short_pct_of_float")
-                if short_pct is not None and short_pct > 5.0:  # >5% of float shorted
-                    candidate.score = min(candidate.score * 1.25, 1.0)
-                    candidate.metadata["short_pct_of_float"] = short_pct
-                    candidate.metadata["days_to_cover"] = si.get("days_to_cover", 0)
-            if isinstance(profile_data, dict) and candidate.ticker in profile_data:
-                candidate.metadata["sector"] = profile_data[candidate.ticker].get(
-                    "sector", ""
-                )
-
-        return admit_candidates(self.name, candidates, params.get("analysis_budget", params.get("max_positions", 4)))
+        return admit_candidates(
+            self.name,
+            candidates,
+            params.get("analysis_budget", params.get("max_positions", 4)),
+        )
 
     def check_exit(
         self,
@@ -166,10 +212,18 @@ class SupplyChainStrategy:
         hold_days = params.get("hold_days", 22)
         if holding_days >= hold_days:
             return True, "hold_period"
-        # Take profit at 8%
-        pnl_pct = (1 if direction == "long" else -1) * (current_price - entry_price) / entry_price
-        if abs(pnl_pct) > 0.08:
-            return True, "take_profit"
+        take_profit_pct = float(params.get("take_profit_pct", 0.08))
+        stop_loss_pct = float(params.get("stop_loss_pct", 0.08))
+        if entry_price > 0:
+            pnl_pct = (
+                (1 if direction == "long" else -1)
+                * (current_price - entry_price)
+                / entry_price
+            )
+            if pnl_pct >= take_profit_pct:
+                return True, "take_profit"
+            if pnl_pct <= -stop_loss_pct:
+                return True, "stop_loss"
         return False, ""
 
     def build_propose_prompt(self, context: dict) -> str:
