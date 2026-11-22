@@ -283,10 +283,7 @@ class CohortOrchestrator:
         self.cohorts: list[dict[str, Any]] = []
         if base_config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("CohortOrchestrator is paper-only")
-        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
-        strategies = configure_strategies(get_paper_trade_strategies(), ar_config)
-        from .bounded_document_inputs import configure_strategies as configure_document_strategies
-        strategies = configure_document_strategies(strategies, ar_config)
+        strategies = list(get_paper_trade_strategies())
         from .operating_contract import configure_strategies as stabilization_strategies
         strategies = stabilization_strategies(strategies, ar_config, full_config=base_config)
         from .source_lifecycle_policy import configured as lifecycle_configured

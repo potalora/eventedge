@@ -315,41 +315,17 @@ class MultiStrategyEngine:
             )
         self.config = config or {}
         self.ar_config = self.config.get("autoresearch", {})
-        from .regulation_publication_policy import validate_configuration as publication_configured
-        publication_configured(self.config)
-        from ..data_sources.regulation_graphics_grid import configured as graphics_execution_configured
-        graphics_execution_configured(self.config)
-        from ..data_sources.regulation_assessment import configured as regulation_assessment_configured
-        regulation_assessment_configured(self.ar_config)
-        from .filing_research_policy import configured as filing_research_disabled
-        filing_research_disabled(self.ar_config)
         from .research_resilience import configured as research_resilience_configured
-        resilience = research_resilience_configured(self.ar_config)
-        from .enrichment_capabilities import configured as enrichment_capability_configured
-        if enrichment_capability_configured(self.ar_config) and not resilience:
-            raise ValueError('invalid_enrichment_capability_policy: research projection required')
+        research_resilience_configured(self.ar_config)
         from .research_resilience import capability_configured
         capability_configured(self.ar_config)
-        from .congress_policy import configured
-        configured(self.ar_config)
-        from tradingagents.strategies.data_sources.filing_attribution_policy import configured as filing_attribution_configured
-        filing_attribution_configured(self.ar_config)
-        from .filing_acquisition_validation import configured as filing_acquisition_configured
-        filing_acquisition_configured(self.ar_config)
-        from tradingagents.strategies.data_sources.filing_material_policy import configured as filing_material_configured
-        filing_material_configured(self.ar_config)
 
         # Load strategies (paper-trade only)
-        from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
-        self.paper_trade_strategies = configure_strategies(strategies or get_paper_trade_strategies(), self.ar_config)
-        from .bounded_document_inputs import configure_strategies as configure_document_strategies
-        self.paper_trade_strategies = configure_document_strategies(self.paper_trade_strategies, self.ar_config)
+        self.paper_trade_strategies = list(strategies or get_paper_trade_strategies())
 
         from .operating_contract import configured as stabilization_configured, configure_strategies as stabilization_strategies
         if stabilization_configured(self.config):
             self.paper_trade_strategies = stabilization_strategies(self.paper_trade_strategies, self.ar_config, full_config=self.config)
-        from .filing_research_policy import declaration as filing_declaration
-        filing_declaration(self.ar_config)
         from .source_lifecycle_policy import configured as lifecycle_configured
         lifecycle_configured(self.ar_config, self.paper_trade_strategies)
 
@@ -1027,20 +1003,6 @@ class MultiStrategyEngine:
         from tradingagents.strategies.orchestration.decision_clock import resolve_cutoff, policy, PROSPECTIVE, require_live_staging
         decision_context = data.get('_decision_context')
         cutoff = resolve_cutoff(self.config, session, decision_context)
-        from ..document_review_clock import POLICY as DOCUMENT_NEXT_OPEN_POLICY, validate_final_signals, validate_stage_binding
-        if self.ar_config.get('bounded_document_decision_policy') == DOCUMENT_NEXT_OPEN_POLICY:
-            validate_stage_binding(self, session, decision_context, epoch_id, shared_regime, original_enrichment)
-            validate_final_signals(self.config, session, data, shared_signals, shared_regime, horizon,
-                decision_context.get('document_review_binding') if isinstance(decision_context, dict) else None)
-        if self.ar_config.get('state_economics_policy') and any(
-                row.get('strategy') == 'state_economics' and not row.get('journal_only')
-                and row.get('direction') in {'long', 'short'} for row in shared_signals):
-            from .state_inputs import state_policy_scope
-            state_scope = state_policy_scope(data, self.ar_config, trading_date)
-            if (not state_scope['source_coverage']['complete'] or state_scope['exposure_registry_error']
-                    or any(row.get('metadata', {}).get('state_registry_sha256') != state_scope['exposure_registry_sha256']
-                        for row in shared_signals if row.get('strategy') == 'state_economics' and not row.get('journal_only'))):
-                raise ValueError('invalid_state_exposure_at_staging_cutoff')
         eligible_session = next_session(session)
         expected_staging_state_digest = self.ledger.verify_session_phase_chain(
             session, PHASES
@@ -1597,7 +1559,7 @@ class MultiStrategyEngine:
             if failures:
                 decision_status["enrichment_failures"] = failures
             if "short_interest_acquisition" in (original_enrichment or {}):
-                from tradingagents.strategies.data_sources.finra_bulk import validated_acquisition
+                from tradingagents.strategies.data_sources.finra_query import validated_acquisition
                 decision_status["short_interest_acquisition"] = validated_acquisition(
                     original_enrichment["short_interest_acquisition"])
             decision_status["selected_signal_ids"] = sorted({

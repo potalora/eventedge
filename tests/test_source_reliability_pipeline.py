@@ -181,7 +181,7 @@ class TransportFixture:
         if "api.usaspending.gov" in url:
             return self.response({"results": [], "page_metadata": {"page":1,"hasNext": False}})
         if "ncei.noaa.gov/pub/data/ghcn/daily" in url:
-            from tradingagents.strategies.data_sources.noaa_source import AG_STATES
+            from tradingagents.strategies.data_sources.noaa_yearly_source import AG_STATES
             stations = {f"USC{i:08}": state for i, state in enumerate(AG_STATES, 1)}
             if url.endswith("ghcnd-stations.txt"):
                 # Native GHCN catalog fixed columns: ID 1-11, state 39-40.

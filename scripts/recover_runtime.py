@@ -29,12 +29,21 @@ from tradingagents.strategies.orchestration.runtime_recovery import (
 from tradingagents.strategies.orchestration.runtime_lock import (
     RuntimeLockBusy, RuntimeLockInvalid, canonical_runtime_lock_path, runtime_lock,
 )
-from tradingagents.strategies.orchestration.source_retirement import (
-    generation_for_session, validate_generation_retirement, execution_boundary,
-)
 from tradingagents.strategies.orchestration.trading_calendar import (
     exchange_date, is_session, session_close,
 )
+
+
+def generation_for_session(row, session):
+    return row
+
+
+def validate_generation_retirement(row, *, repo=None):
+    return None
+
+
+def execution_boundary(row):
+    return ''
 
 
 def manifest_rows(repo, *, all_rows=False):

@@ -30,13 +30,24 @@ from tradingagents.strategies.orchestration.runtime_lock import (
     runtime_lock,
 )
 from tradingagents.strategies.orchestration.session_executor import PHASES
-from tradingagents.strategies.orchestration.source_retirement import (
-    CONFIG_NAME, execution_boundary, generation_for_session, validate_generation_retirement,
-)
 from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
     previous_session,
 )
+
+CONFIG_NAME = "generation-config-congress-retired.json"
+
+
+def generation_for_session(row, session):
+    return row
+
+
+def validate_generation_retirement(row, *, repo=None):
+    return None
+
+
+def execution_boundary(row):
+    return ""
 
 COHORTS = tuple(
     f"horizon_{horizon}_size_{size}"

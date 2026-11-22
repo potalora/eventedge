@@ -131,10 +131,6 @@ class LLMAnalyzer:
 
     def __init__(self, config: dict | None = None) -> None:
         self.config = config or {}
-        from tradingagents.strategies.data_sources.regulation_graphics_grid import configured as graphics_execution_configured
-        graphics_execution_configured(self.config)
-        from tradingagents.strategies.data_sources.regulation_prompt_budget import configured as budget_configured
-        budget_configured(self.config.get('autoresearch', {}))
         self._model_name = self.config.get(
             "autoresearch", {}
         ).get("autoresearch_model", "claude-haiku-4-5-20251001")

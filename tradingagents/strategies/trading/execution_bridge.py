@@ -3,15 +3,11 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from typing import Any
 
-from tradingagents.execution.base_broker import AccountInfo, OrderResult
-from tradingagents.execution.paper_broker import (
-    DIRECT_SUBMISSION_DISABLED,
-    PaperBroker,
-)
 from tradingagents.strategies.execution import (
     AccountState,
     FillResult,
@@ -39,6 +35,47 @@ from tradingagents.strategies.trading.risk_gate import (
 
 logger = logging.getLogger(__name__)
 
+DIRECT_SUBMISSION_DISABLED = (
+    "Direct price submission is disabled; stage and execute a ledger intent"
+)
+
+
+@dataclass
+class OrderResult:
+    order_id: str
+    status: str
+    filled_qty: float = 0
+    filled_price: float = 0.0
+    message: str = ""
+
+
+@dataclass
+class AccountInfo:
+    cash: float
+    portfolio_value: float
+    buying_power: float
+
+
+class _LedgerBrokerAdapter:
+    """Read-only view of PortfolioLedger for RiskGate account/position queries."""
+
+    def __init__(self, ledger: PortfolioLedger) -> None:
+        self.ledger = ledger
+
+    def get_positions(self) -> list[dict[str, Any]]:
+        return [
+            {**position, "avg_price": float(position["avg_price"])}
+            for position in self.ledger.open_positions()
+        ]
+
+    def get_account(self) -> AccountInfo:
+        state = self.ledger.account_state()
+        return AccountInfo(
+            cash=float(state.cash),
+            portfolio_value=float(state.net_equity),
+            buying_power=float(state.buying_power),
+        )
+
 
 class ZeroShareIntentError(ValueError):
     """A valid approved allocation cannot fund one whole reference-price share."""
@@ -52,7 +89,7 @@ class ExecutionBridge:
         if config.get("execution", {}).get("mode", "paper") != "paper":
             raise ValueError("EventEdge cohort execution must remain paper-only")
         self.ledger = ledger
-        self.broker = PaperBroker(ledger)
+        self.broker = _LedgerBrokerAdapter(ledger)
         self.risk_gate = RiskGate(RiskGateConfig.from_dict(config), self.broker)
         short_config = config.get("autoresearch", {}).get("short_selling", {})
         try:

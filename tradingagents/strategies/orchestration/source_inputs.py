@@ -46,16 +46,13 @@ def _capacity(max_bytes=None, max_nodes=None) -> tuple[int, int]:
 def source_codec_limits(config: Mapping, *, source: str | None = None) -> dict[str, int]:
     """Complete corpora have explicit finite capacity; other stores keep defaults."""
     ar_config = config.get('autoresearch', {})
-    from .regulation_publication_policy import configured as publication_configured
-    linked_publications = publication_configured(ar_config)
     if ((ar_config.get('filing_evidence_policy') == 'complete_submission_v1'
             and source in (None, 'edgar'))
             or (ar_config.get('congress_disclosure_policy') == 'display_audit_only_v1'
                 and source in (None, 'congress'))):
         return {'max_bytes': FULL_FILING_MAX_BYTES, 'max_nodes': FULL_FILING_MAX_NODES}
     if (ar_config.get('regulation_evidence_policy') == 'complete_document_text_v1'
-            and (ar_config.get('regulation_retrieval_policy') == 'verified_government_copy_v3'
-                 or linked_publications)
+            and ar_config.get('regulation_retrieval_policy') == 'verified_government_copy_v3'
             and source in (None, 'regulations')):
         return {'max_bytes': REGULATION_GRAPHICS_MAX_BYTES, 'max_nodes': MAX_NODES}
     return {}
@@ -216,10 +213,6 @@ def configuration_fingerprint(config: Mapping[str, Any]) -> str:
 def source_configuration_fingerprint(config: Mapping[str, Any], *, exclude_horizon: bool = False) -> str:
     """Bind effective credential fallbacks without saving credentials in documents."""
     ar = dict(config.get('autoresearch', {}))
-    from .enrichment_capabilities import configured as enrichment_configured
-    enrichment_configured(ar)
-    from .congress_audit_continuity import configured as congress_continuity_configured
-    congress_continuity_configured(ar)
     credentials = {
         'fmp_api_key': 'FMP_API_KEY', 'fred_api_key': 'FRED_API_KEY',
         'finnhub_api_key': 'FINNHUB_API_KEY', 'regulations_api_key': 'REGULATIONS_API_KEY',
@@ -259,10 +252,6 @@ def public_source_configuration_fingerprint(config: Mapping[str, Any]) -> str:
     fingerprint. This additional declaration is retained inside the existing
     accepted payload so historical completion can verify public behavior.
     """
-    from .enrichment_capabilities import configured as enrichment_configured
-    enrichment_configured(dict(config.get('autoresearch', {})))
-    from .congress_audit_continuity import configured as congress_continuity_configured
-    congress_continuity_configured(dict(config.get('autoresearch', {})))
     effective = dict(config)
     effective.pop('decision_shadow', None)
     omitted = _SOURCE_CREDENTIALS | {'state_dir', 'source_cache_dir', 'source_cache_ttl_s', 'filing_spool_dir'}
@@ -273,10 +262,6 @@ def public_source_configuration_fingerprint(config: Mapping[str, Any]) -> str:
 def public_source_configuration_declaration(config: Mapping[str, Any]) -> dict:
     """Generation-bound, secret-free facts; never a new authority/success flag."""
     ar = config.get('autoresearch', {})
-    from .enrichment_capabilities import configured as enrichment_configured
-    enrichment_configured(dict(ar))
-    from .congress_audit_continuity import configured as congress_continuity_configured
-    congress_continuity_configured(dict(ar))
     if ar.get('stabilization_profile_policy') != 'supported_sixteen_books_v1':
         return {}
     import re

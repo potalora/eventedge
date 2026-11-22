@@ -14,7 +14,7 @@ from tradingagents.strategies.trading.risk_gate import (
     RiskGateConfig,
     _estimate_borrow_cost,
 )
-from tradingagents.execution.base_broker import AccountInfo
+from tradingagents.strategies.trading.execution_bridge import AccountInfo
 
 
 def _make_broker(cash=50_000, portfolio_value=50_000, positions=None):

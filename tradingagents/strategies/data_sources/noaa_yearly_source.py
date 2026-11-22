@@ -22,8 +22,28 @@ from zoneinfo import ZoneInfo
 
 
 from .fetch_errors import SourceFetchError, source_fetch_error
-from .noaa_source import AG_STATES, GROWING_SEASON, HEAT_STRESS_F, FROST_THRESHOLD_F
 from .request_policy import provider_subbudget, provider_request, provider_timeout
+
+# Key US agricultural states (Corn Belt + Plains)
+AG_STATES = {
+    "IL": "FIPS:17",
+    "IA": "FIPS:19",
+    "KS": "FIPS:20",
+    "NE": "FIPS:31",
+    "MN": "FIPS:27",
+    "IN": "FIPS:18",
+    "OH": "FIPS:39",
+    "SD": "FIPS:46",
+    "ND": "FIPS:38",
+    "MO": "FIPS:29",
+}
+
+# Growing season: April through September
+GROWING_SEASON = (4, 9)
+
+# Crop stress thresholds
+HEAT_STRESS_F = 95  # Corn/soy stress threshold
+FROST_THRESHOLD_F = 32  # Killing frost
 
 CATALOG_URL = 'https://www.ncei.noaa.gov/pub/data/ghcn/daily'
 YEARLY_URL = CATALOG_URL + '/by_year'

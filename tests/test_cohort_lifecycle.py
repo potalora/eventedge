@@ -26,7 +26,6 @@ import pytest
 from tradingagents.strategies.orchestration.multi_strategy_engine import (
     MultiStrategyEngine,
 )
-from tradingagents.strategies.trading.paper_trader import PaperTrader
 from tradingagents.strategies.learning.signal_journal import SignalJournal
 from tradingagents.strategies.execution.models import MarketBar
 from tradingagents.strategies.execution.price_source import (
@@ -138,55 +137,8 @@ def state(state_dir):
 
 
 @pytest.fixture
-def trader(state):
-    return PaperTrader(state)
-
-
-@pytest.fixture
 def journal(state_dir):
     return SignalJournal(state_dir)
-
-
-# ---------------------------------------------------------------------------
-# Test: PnL computed on close_trade
-# ---------------------------------------------------------------------------
-
-
-class TestPnLOnClose:
-    def test_close_trade_stores_pnl(self, trader, state):
-        """close_trade() is no longer an accounting mutation path."""
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.close_trade("trade", 110.0, "2026-03-15", "hold_period")
-
-    def test_close_trade_short_pnl(self, trader, state):
-        """Short mutation is rejected by the read-only wrapper."""
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.open_trade("fake_strat", "TSLA", "short", 200.0, "2026-03-01")
-
-    def test_close_trade_loss(self, trader, state):
-        """Long mutation is rejected by the read-only wrapper."""
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.open_trade("fake_strat", "AAPL", "long", 100.0, "2026-03-01")
-
-
-# ---------------------------------------------------------------------------
-# Test: paper_trader.check_exits triggers strategy exit rules
-# ---------------------------------------------------------------------------
-
-
-class TestCheckExits:
-    def test_hold_period_exit(self, trader, state):
-        """Trade exits after holding period."""
-        # Dates are relative to "now" so they stay inside the price window that
-        # _make_price_df anchors to datetime.now() (avoids a time-dependent test).
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.check_exits({}, {}, datetime.now().strftime("%Y-%m-%d"))
-
-    def test_stop_loss_exit(self, trader, state):
-        """Trade exits on stop loss."""
-        # Relative dates keep the check inside _make_declining_price_df's window.
-        with pytest.raises(RuntimeError, match="read-only"):
-            trader.check_exits({}, {}, datetime.now().strftime("%Y-%m-%d"))
 
 
 # ---------------------------------------------------------------------------

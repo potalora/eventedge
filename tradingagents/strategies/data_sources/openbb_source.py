@@ -419,7 +419,8 @@ class OpenBBSource:
     def fetch_short_interest(self, tickers: list[str], *, as_of=None) -> dict[str, Any]:
         """Query FINRA for exact current-cycle symbols within one inherited budget."""
         from . import finra_query
-        from .finra_bulk import population_digest, validated_acquisition
+        population_digest = finra_query.population_digest
+        validated_acquisition = finra_query.validated_acquisition
         from .finra_schedule import validate_current_settlement
         from .request_policy import provider_subbudget, provider_clock_time
         acquired_at = datetime.fromisoformat(acquisition_time())

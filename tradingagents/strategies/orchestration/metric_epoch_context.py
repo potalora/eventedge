@@ -183,14 +183,6 @@ def _validate_execution_policy_schema(policy: object) -> None:
         raise ValueError(
             f"execution_policy key set is missing {sorted(missing)[0]!r}"
         )
-    from .enrichment_capabilities import configured as enrichment_configured
-    enrichment_configured(policy)
-    if "congress_audit_continuity_policy" in policy:
-        from .congress_audit_continuity import POLICY as CONGRESS_CONTINUITY_POLICY
-        if (type(policy['congress_audit_continuity_policy']) is not str
-                or policy['congress_audit_continuity_policy'] != CONGRESS_CONTINUITY_POLICY
-                or policy.get('stabilization_profile_policy') != 'supported_sixteen_books_v1'):
-            raise ValueError('invalid_congress_audit_continuity_policy')
     if "research_resilience_policy" in policy:
         from .research_resilience import configured
         if not configured(policy):

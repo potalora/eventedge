@@ -19,7 +19,6 @@ import sqlite3
 
 from tradingagents.default_config import DEFAULT_CONFIG
 from tradingagents.strategies.modules import get_paper_trade_strategies
-from tradingagents.strategies.data_sources.state_economics_policy import configure_strategies
 from . import operational_report as report_io
 from .generation_config import apply_generation_config
 from .local_continuity import REQUIRED_CHECKS, classify_session
@@ -177,7 +176,7 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
             and session_close(day)<=start<=finish<session_open(next_session(day)))
         slot=configuration_fingerprint({'generation':generation,'session':session})
         source=report_io._accepted_envelope(state/'source_inputs'/(slot+'.json'),generation,session,expected_commit)
-        strategies={strategy.name:strategy for strategy in configure_strategies(get_paper_trade_strategies(),ar)}
+        strategies={strategy.name:strategy for strategy in get_paper_trade_strategies()}
         from .filing_research_policy import configured as filing_disabled
         excluded=filing_disabled(ar)
         edgar=source['payload'].get('edgar',{})

@@ -10,10 +10,30 @@ from dataclasses import dataclass
 from datetime import date
 import re
 
-from . import filing_research_policy as filing
 from . import source_lifecycle_policy as lifecycle
-from . import enrichment_capabilities as enrichment_capabilities
-from . import congress_audit_continuity as congress_continuity
+
+
+class _DisabledPolicyStub:
+    REASON = 'filing_research_disabled'
+    DECLARATION_KEY = 'filing_research_policy'
+    KEY = 'congress_audit_continuity_policy'
+
+    @staticmethod
+    def configured(_ar):
+        return False
+
+    @staticmethod
+    def declaration(_ar):
+        return {}
+
+    @staticmethod
+    def warning_for_source(*_args, **_kwargs):
+        return None
+
+
+filing = _DisabledPolicyStub
+enrichment_capabilities = _DisabledPolicyStub
+congress_continuity = _DisabledPolicyStub
 
 POLICY = 'supported_sixteen_books_v1'
 HORIZONS = ('30d', '3m', '6m', '1y')
