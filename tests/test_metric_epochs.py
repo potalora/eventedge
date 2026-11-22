@@ -328,17 +328,14 @@ def test_store_reopen_and_current_selection_are_deterministic(tmp_path) -> None:
             )
         }
         journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
-        assert tables == {
-            "candidate_bar_recoveries",
-            "candidate_input_issues",
-            "candidate_signal_identity_bindings",
-            "critical_gap_markers",
-            "governed_bar_recoveries",
-            "metric_epochs",
-            "outcomes",
+        from tradingagents.strategies.state.generation_db import ALL_TABLES
+
+        assert ALL_TABLES | {
             "outcome_inputs",
-            "strategy_health",
-        }
+            "critical_gap_markers",
+            "candidate_signal_identity_bindings",
+            "candidate_signal_identity_rows",
+        } <= tables
     assert journal_mode == "wal"
 
 
@@ -365,26 +362,14 @@ def test_pending_critical_gap_round_trips_and_completes_idempotently(tmp_path) -
 def test_critical_gap_schema_migrates_existing_store_and_indexes_pending(
     tmp_path,
 ) -> None:
-    path = tmp_path / "metrics_v2.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE metric_epochs (epoch_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
-            CREATE TABLE outcomes (
-              outcome_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, payload_json TEXT NOT NULL
-            );
-            CREATE TABLE strategy_health (
-              health_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL,
-              session TEXT NOT NULL, payload_json TEXT NOT NULL
-            );
-            """
-        )
+    from tradingagents.strategies.state.generation_db import GenerationDB
 
-    store = MetricStore(path)
+    db = GenerationDB.for_state_dir(tmp_path)
+    store = MetricStore(db)
     store.begin_critical_gap(_minimal_critical_gap())
     store.attach_critical_gap_details(_critical_gap())
 
-    with sqlite3.connect(path) as connection:
+    with sqlite3.connect(db.path) as connection:
         indexes = {
             row[1]
             for row in connection.execute("PRAGMA index_list('critical_gap_markers')")

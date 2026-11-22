@@ -9,7 +9,7 @@ import pytest
 from test_execution_audit_repairs import MON, at, cfg, intent, seed
 from test_inventory_continuity import Source
 from tradingagents.strategies.execution import CorporateAction
-from tradingagents.strategies.execution.price_source import YFinancePriceSource
+from tradingagents.strategies.execution.price_source import YahooActionsBenchmarksSource
 from tradingagents.strategies.orchestration.session_executor import SessionExecutor
 from tradingagents.strategies.orchestration.trading_calendar import next_session
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
@@ -30,7 +30,7 @@ def provider(monkeypatch, rows, now):
     monkeypatch.setenv('ALPACA_SECRET_KEY', 'test')
     response = Mock(status_code=200)
     response.json.return_value = {'corporate_actions': {'cash_dividends': rows}, 'next_page_token': None}
-    source = YFinancePriceSource(now=lambda: at(now))
+    source = YahooActionsBenchmarksSource(now=lambda: at(now))
     return source, response
 
 
@@ -38,7 +38,7 @@ def test_normal_yahoo_action_gets_verified_native_payment_date(monkeypatch):
     pay = next_session(MON)
     source, response = provider(monkeypatch, [native_row()], MON)
     frame = pd.DataFrame({'Dividends': [1.0], 'Stock Splits': [0.0]}, index=pd.to_datetime([MON]))
-    with patch.object(source, '_raw_frame', return_value=(frame, at(MON))), patch('tradingagents.strategies.execution.price_source.YFinancePriceSource._payment_terms_get', return_value=response.json.return_value):
+    with patch.object(source, '_raw_frame', return_value=(frame, at(MON))), patch('tradingagents.strategies.execution.price_source.YahooActionsBenchmarksSource._payment_terms_get', return_value=response.json.return_value):
         result = source.get_corporate_actions(['AAPL'], MON)[0]
     assert result.payment_date == pay
     assert result.payment_source == 'alpaca-corporate-actions-v1'
@@ -93,13 +93,13 @@ def test_late_terms_after_close_settle_once_without_rewriting_ex_date(tmp_path, 
 ])
 def test_unverified_or_unsupported_native_terms_remain_unknown(monkeypatch, change):
     source, response = provider(monkeypatch, [native_row(**change)], next_session(MON))
-    with patch('tradingagents.strategies.execution.price_source.YFinancePriceSource._payment_terms_get', return_value=response.json.return_value):
+    with patch('tradingagents.strategies.execution.price_source.YahooActionsBenchmarksSource._payment_terms_get', return_value=response.json.return_value):
         assert source.enrich_dividend_payment_terms([action()]) == [action()]
 
 
 def test_ambiguous_or_incomplete_pagination_cannot_credit_cash(monkeypatch):
     source, response = provider(monkeypatch, [native_row(), native_row(id='other')], next_session(MON))
-    with patch('tradingagents.strategies.execution.price_source.YFinancePriceSource._payment_terms_get', return_value=response.json.return_value) as request:
+    with patch('tradingagents.strategies.execution.price_source.YahooActionsBenchmarksSource._payment_terms_get', return_value=response.json.return_value) as request:
         assert source.enrich_dividend_payment_terms([action()]) == [action()]
         response.json.return_value['next_page_token'] = 'remaining'
         assert source.enrich_dividend_payment_terms([action()]) == [action()]
@@ -144,7 +144,7 @@ def test_payment_observation_cannot_backdate_into_prior_session(tmp_path):
 @pytest.mark.parametrize('currency', [None, ''])
 def test_missing_optional_currency_enriches_date_only(monkeypatch, currency):
     source, response = provider(monkeypatch, [native_row(currency=currency)], next_session(MON))
-    with patch('tradingagents.strategies.execution.price_source.YFinancePriceSource._payment_terms_get', return_value=response.json.return_value):
+    with patch('tradingagents.strategies.execution.price_source.YahooActionsBenchmarksSource._payment_terms_get', return_value=response.json.return_value):
         enriched = source.enrich_dividend_payment_terms([action()])[0]
     assert enriched.payment_date == next_session(MON)
     assert replace(enriched, payment_date=None, payment_source='', payment_reference='', payment_observed_at=None) == action()
@@ -154,7 +154,7 @@ def test_enrichment_paginates_process_dates_then_matches_ex_date(monkeypatch):
     source, response = provider(monkeypatch, [native_row()], next_session(MON))
     first = Mock(status_code=200)
     first.json.return_value = {'corporate_actions': {'cash_dividends': [native_row(ex_date='2020-01-01')]}, 'next_page_token': 'second'}
-    with patch('tradingagents.strategies.execution.price_source.YFinancePriceSource._payment_terms_get', side_effect=[first.json.return_value, response.json.return_value]) as get:
+    with patch('tradingagents.strategies.execution.price_source.YahooActionsBenchmarksSource._payment_terms_get', side_effect=[first.json.return_value, response.json.return_value]) as get:
         result = source.enrich_dividend_payment_terms([action()])[0]
     assert result.payment_date == next_session(MON)
     assert get.call_count == 2

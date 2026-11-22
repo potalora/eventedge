@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from tradingagents.dashboard.data_loaders import (
-    get_active_generations,
-    load_position_pnl,
-)
+from tradingagents.dashboard.data_loaders import get_active_generations
 
 
 def render() -> None:
@@ -16,10 +13,7 @@ def render() -> None:
     if not gens:
         st.warning("No active generations found.")
         return
-    generation = st.selectbox(
-        "Generation", gens, format_func=lambda item: item["gen_id"]
-    )
-    load_position_pnl(generation["gen_id"], generation["state_dir"])
+    st.selectbox("Generation", gens, format_func=lambda item: item["gen_id"])
     st.info(
         "Position-level ticker detail is unavailable until a governed metric-v2 positions projection exists."
     )

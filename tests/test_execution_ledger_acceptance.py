@@ -965,7 +965,7 @@ def test_execution_ledger_acceptance(case: str, tmp_path, monkeypatch) -> None:
                 ("short", 2, 2, "49.950"),
             ]
             dividends = ledger.connection.execute(
-                "SELECT direction, amount FROM dividend_events ORDER BY direction"
+                "SELECT direction, amount FROM dividend_receivables ORDER BY direction"
             ).fetchall()
             assert [
                 (row[0], Decimal(row[1])) for row in dividends
