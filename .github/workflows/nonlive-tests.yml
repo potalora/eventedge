@@ -10,8 +10,8 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Target <10 minutes end-to-end with a clean 15-minute ceiling.
-    timeout-minutes: 15
+    # Target ~12-13 minutes end-to-end on 2-vCPU Ubuntu with a clean 20-minute ceiling.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

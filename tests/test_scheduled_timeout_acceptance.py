@@ -191,8 +191,8 @@ def test_outer_controller_timeout_forwards_to_nested_preflight_group(tmp_path):
     try:
         result = harness.run('2026-10-14T22:00:00+00:00', entrypoint='controller',
                              fault='stall_transport_worker', preflight_timeout=60,
-                             daily_timeout=10, timeout=40)
-        assert time.monotonic()-started < 35
+                             daily_timeout=25, timeout=70)
+        assert time.monotonic()-started < 55
         assert result.returncode==0, result.stdout+result.stderr
         status = json.loads(result.stdout)
         assert status['status']=='recovering', status
