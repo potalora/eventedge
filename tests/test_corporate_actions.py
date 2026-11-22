@@ -172,7 +172,7 @@ def test_cash_dividend_credits_long_debits_short_and_duplicate_is_noop(tmp_path)
         )
         assert (
             ledger.connection.execute(
-                "SELECT COUNT(*) FROM dividend_events"
+                "SELECT COUNT(*) FROM dividend_receivables"
             ).fetchone()[0]
             == 2
         )
@@ -399,69 +399,4 @@ def test_corporate_action_default_audit_time_is_causal_and_earlier_time_rejects(
         ledger.close()
 
 
-def test_prefixed_adjustment_schema_backfills_reversed_physical_chain(tmp_path):
-    path = tmp_path / "legacy.db"
-    ledger = PortfolioLedger(path, COHORT, Decimal("5000"))
-    try:
-        _, original_exit = _opened_long(ledger)
-        ledger.apply_corporate_actions(
-            SESSION,
-            [_action("a", "split", ratio="2"), _action("b", "split", ratio="3")],
-        )
-        ledger.connection.execute("DROP INDEX ux_intent_adjustment_sequence")
-        ledger.connection.execute(
-            "ALTER TABLE intent_action_adjustments RENAME TO modern_adjustments"
-        )
-        ledger.connection.execute(
-            """CREATE TABLE intent_action_adjustments (
-        adjustment_id TEXT PRIMARY KEY, action_id TEXT NOT NULL, intent_id TEXT NOT NULL,
-        original_qty INTEGER NOT NULL, adjusted_qty INTEGER NOT NULL,
-        original_stop_price TEXT, adjusted_stop_price TEXT, applied_at TEXT NOT NULL,
-        UNIQUE(action_id, intent_id))"""
-        )
-        ledger.connection.execute(
-            """INSERT INTO intent_action_adjustments
-               SELECT adjustment_id, action_id, intent_id, original_qty, adjusted_qty,
-                      original_stop_price, adjusted_stop_price, applied_at
-               FROM modern_adjustments ORDER BY adjustment_sequence DESC"""
-        )
-        ledger.connection.execute("DROP TABLE modern_adjustments")
-    finally:
-        ledger.close()
-    ledger = PortfolioLedger(path, COHORT, Decimal("5000"))
-    try:
-        assert [
-            row[0]
-            for row in ledger.connection.execute(
-                "SELECT adjustment_sequence FROM intent_action_adjustments ORDER BY adjustment_sequence"
-            )
-        ] == [1, 2]
-        ledger.stage_intent(original_exit)
-        current = ledger.pending_intents(SESSION)[0]
-        assert current.requested_qty == 60
-        assert current.stop_price == Decimal("15.83333333333333333333333333")
-    finally:
-        ledger.close()
 
-
-def test_prefixed_adjustment_schema_ambiguous_chain_fails_closed(tmp_path):
-    path = tmp_path / "ambiguous.db"
-    connection = sqlite3.connect(path)
-    connection.execute(
-        """CREATE TABLE intent_action_adjustments (
-        adjustment_id TEXT PRIMARY KEY, action_id TEXT NOT NULL, intent_id TEXT NOT NULL,
-        original_qty INTEGER NOT NULL, adjusted_qty INTEGER NOT NULL,
-        original_stop_price TEXT, adjusted_stop_price TEXT, applied_at TEXT NOT NULL,
-        UNIQUE(action_id, intent_id))"""
-    )
-    connection.executemany(
-        "INSERT INTO intent_action_adjustments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            ("a", "a", "exit", 10, 20, "95", "47.5", "x"),
-            ("b", "b", "exit", 10, 30, "95", "31.6", "x"),
-        ],
-    )
-    connection.commit()
-    connection.close()
-    with pytest.raises(ValueError, match="ambiguous chain"):
-        PortfolioLedger(path, COHORT, Decimal("5000"))

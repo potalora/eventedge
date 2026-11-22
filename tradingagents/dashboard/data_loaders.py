@@ -1,17 +1,23 @@
 """Cached data loading layer for the autoresearch dashboard.
 
-Bridges JSON state files in data/generations/ to Streamlit pages using
-@st.cache_data for efficient caching (data changes once per day).
+Reads authoritative state from unified ``generation.sqlite3`` (with legacy
+read-only fallback for pre-gen_003 generations) using ``@st.cache_data``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 from typing import Any
 
 import streamlit as st
+
+from tradingagents.strategies.state.generation_db import (
+    GENERATION_DB_FILENAME,
+    GenerationDB,
+)
 
 HORIZONS = ("30d", "3m", "6m", "1y")
 SIZES = ("5k", "10k", "50k", "100k")
@@ -34,11 +40,39 @@ def _cohort_dirs(gen_state_dir: str) -> dict[str, str]:
 
 
 def _open_metrics_service(gen_state_dir: str):
-    """Open the exact existing v2 ledgers for one cached dashboard read."""
+    """Open authoritative read-only v2 ledgers for one cached dashboard read."""
     from tradingagents.strategies.metrics.service import MetricsService
     from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
 
     root = Path(gen_state_dir)
+    gen_db_path = root / GENERATION_DB_FILENAME
+    if gen_db_path.is_file():
+        db = GenerationDB.open_readonly(gen_db_path)
+        with db.connect(readonly=True) as conn:
+            cohort_rows = conn.execute(
+                "SELECT DISTINCT cohort_id FROM accounting_state ORDER BY cohort_id"
+            ).fetchall()
+        cohort_ids = [str(row["cohort_id"]) for row in cohort_rows]
+        if not cohort_ids:
+            return None, ()
+        ledgers = []
+        try:
+            bindings = {}
+            for cohort_id in cohort_ids:
+                ledger = PortfolioLedger.open_existing(
+                    db, cohort_id=cohort_id, immutable=True
+                )
+                ledgers.append(ledger)
+                bindings[cohort_id] = ledger
+            return (
+                MetricsService(db, bindings, read_only=True),
+                tuple(ledgers),
+            )
+        except BaseException:
+            for ledger in ledgers:
+                ledger.close()
+            raise
+
     metrics_path = root / "metrics_v2.sqlite3"
     ledger_paths = {
         cohort_id: Path(cohort_dir) / "portfolio.db"
@@ -179,34 +213,43 @@ def load_cohort_heatmap(
 
 
 # ------------------------------------------------------------------
-# Trades
-# ------------------------------------------------------------------
-
-
-@st.cache_data(ttl=3600)
-def load_all_trades(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
-    """Compatibility placeholder until the v2 contract exposes positions."""
-    load_generation_metrics(gen_id, gen_state_dir)
-    return []
-
-
-# ------------------------------------------------------------------
 # Regime history
 # ------------------------------------------------------------------
 
 
 @st.cache_data(ttl=3600)
 def load_regime_history(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
-    """Load regime snapshots, deduplicated by date.
+    """Load regime snapshots from ``generation.sqlite3`` (deduped by date)."""
+    root = Path(gen_state_dir)
+    gen_db_path = root / GENERATION_DB_FILENAME
+    if gen_db_path.is_file():
+        db = GenerationDB.open_readonly(gen_db_path)
+        with db.connect(readonly=True) as conn:
+            rows = conn.execute(
+                """SELECT session, payload_json, payload_sha256, captured_at
+                   FROM regime_snapshots ORDER BY session"""
+            ).fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            actual_sha = hashlib.sha256(
+                row["payload_json"].encode("utf-8")
+            ).hexdigest()
+            if actual_sha != row["payload_sha256"]:
+                raise ValueError(
+                    f"regime_snapshots digest mismatch for session {row['session']!r}"
+                )
+            entry = dict(json.loads(row["payload_json"]))
+            entry.setdefault("session", row["session"])
+            entry.setdefault("timestamp", row["captured_at"])
+            results.append(entry)
+        return results
 
-    Picks the cohort with the most entries (all record the same market
-    regime, just at different run times).
-    """
-    best: list[dict] = []
+    # Legacy fallback for pre-gen_003 per-cohort JSON regime files.
+    best: list[dict[str, Any]] = []
     for h in HORIZONS:
         for s in SIZES:
             name = f"horizon_{h}_size_{s}"
-            rs_path = Path(gen_state_dir) / name / "regime_snapshots.json"
+            rs_path = root / name / "regime_snapshots.json"
             if not rs_path.exists():
                 continue
             try:
@@ -216,8 +259,7 @@ def load_regime_history(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]
             if len(snapshots) > len(best):
                 best = snapshots
 
-    # Deduplicate by date (keep latest per day)
-    by_date: dict[str, dict] = {}
+    by_date: dict[str, dict[str, Any]] = {}
     for snap in best:
         ts = snap.get("timestamp", "")
         date = ts[:10] if len(ts) >= 10 else ts
@@ -236,9 +278,6 @@ def load_signal_stats(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
     """Project governed decision totals; strategy attribution is unavailable."""
     report = load_generation_metrics(gen_id, gen_state_dir)
     books = dict(report.get("headline_books", {}) or {})
-    # V2 records only governed aggregate decision counts.  Do not revive the
-    # legacy journal's calendar-day hit-rate or claim a strategy attribution it
-    # cannot support.
     total_decisions = sum(
         int(book.get("strategy_decisions", 0)) for book in books.values()
     )
@@ -251,11 +290,7 @@ def load_signal_stats(gen_id: str, gen_state_dir: str) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------
-# Capital deployment
-# ------------------------------------------------------------------
-
-# ------------------------------------------------------------------
-# Equity history & live PnL
+# Equity history & capital deployment
 # ------------------------------------------------------------------
 
 
@@ -270,20 +305,6 @@ def load_equity_history(
         for cohort_id, series in dict(report.get("cohort_series", {})).items()
         if series.get("net_equity_history")
     }
-
-
-@st.cache_data(ttl=900)
-def load_position_pnl(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
-    """No position-level report is available from the governed v2 contract yet."""
-    load_generation_metrics(gen_id, gen_state_dir)
-    return []
-
-
-@st.cache_data(ttl=900)
-def load_strategy_pnl(gen_id: str, gen_state_dir: str) -> list[dict[str, Any]]:
-    """No strategy-PnL attribution is available from the governed v2 contract."""
-    load_generation_metrics(gen_id, gen_state_dir)
-    return []
 
 
 @st.cache_data(ttl=3600)

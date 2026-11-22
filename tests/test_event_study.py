@@ -249,6 +249,101 @@ def test_events_from_journals_filters_by_strategy(tmp_path):
     assert events[0].group == "earnings_call"
 
 
+def test_events_from_generation_db_reads_signals_table_and_dedupes(tmp_path):
+    from datetime import date, datetime, timezone
+    from decimal import Decimal
+    from tradingagents.strategies.execution import SignalRecord
+    from tradingagents.strategies.state.generation_db import GenerationDB
+    from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
+    from tradingagents.strategies.validation.journal_source import (
+        events_from_generation_db,
+        events_from_journals,
+    )
+
+    db = GenerationDB.for_state_dir(tmp_path)
+    ledger = PortfolioLedger(db, cohort_id="horizon_30d_size_100k", initial_cash=Decimal("100000"))
+    try:
+        s1 = SignalRecord(
+            signal_id="sig-1",
+            epoch_id="epoch-1",
+            policy_id="policy-1",
+            event_key="evt-aapl-q1",
+            strategy="earnings_call",
+            ticker="AAPL",
+            direction="long",
+            event_at=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 1, 20, 0, tzinfo=timezone.utc),
+            reference_session=date(2026, 5, 1),
+            reference_close=Decimal("200"),
+            decision_at=datetime(2026, 5, 1, 20, 5, tzinfo=timezone.utc),
+            evidence_hash="h1",
+        )
+        # Same canonical event identity with a different signal_id -> should dedupe.
+        s1_dup = SignalRecord(
+            signal_id="sig-1-dup",
+            epoch_id="epoch-1",
+            policy_id="policy-1",
+            event_key="evt-aapl-q1",
+            strategy="earnings_call",
+            ticker="AAPL",
+            direction="long",
+            event_at=datetime(2026, 5, 1, 13, 0, tzinfo=timezone.utc),
+            observed_at=datetime(2026, 5, 1, 20, 1, tzinfo=timezone.utc),
+            reference_session=date(2026, 5, 1),
+            reference_close=Decimal("200"),
+            decision_at=datetime(2026, 5, 1, 20, 5, tzinfo=timezone.utc),
+            evidence_hash="h1",
+        )
+        s2 = SignalRecord(
+            signal_id="sig-2",
+            epoch_id="epoch-2",
+            policy_id="policy-1",
+            event_key="evt-msft-sc",
+            strategy="supply_chain",
+            ticker="MSFT",
+            direction="short",
+            event_at=None,
+            observed_at=datetime(2026, 5, 4, 20, 0, tzinfo=timezone.utc),
+            reference_session=date(2026, 5, 4),
+            reference_close=Decimal("400"),
+            decision_at=datetime(2026, 5, 4, 20, 5, tzinfo=timezone.utc),
+            evidence_hash="h2",
+        )
+        ledger.record_signal_with_journal(
+            s1,
+            payload={"score": 0.85, "metadata": {"published_at": "2026-05-01T13:00:00+00:00"}},
+            queued_at=datetime(2026, 5, 1, 20, 5, tzinfo=timezone.utc),
+        )
+        ledger.record_signal(s1_dup)
+        ledger.record_signal_with_journal(
+            s2,
+            payload={"score": 0.6},
+            queued_at=datetime(2026, 5, 4, 20, 5, tzinfo=timezone.utc),
+        )
+    finally:
+        ledger.close()
+
+    # Pass GenerationDB, Path to dir, or Path to file via both helpers.
+    all_events = events_from_generation_db(db)
+    assert [(e.ticker, e.group, e.event_date) for e in all_events] == [
+        ("AAPL", "earnings_call", "2026-05-01"),
+        ("MSFT", "supply_chain", "2026-05-04"),
+    ]
+    assert all_events[0].metadata["score"] == 0.85
+    assert all_events[0].metadata["anchor_evidence"] == "source_event_time"
+    assert all_events[1].metadata["anchor_evidence"] == "journal_time_proxy"
+
+    # Dispatch through events_from_journals(state_dir) with strategy/epoch/since filters.
+    filtered = events_from_journals(tmp_path, strategy="earnings_call")
+    assert len(filtered) == 1 and filtered[0].ticker == "AAPL"
+
+    by_epoch = events_from_generation_db(db.path, epoch_id="epoch-2")
+    assert len(by_epoch) == 1 and by_epoch[0].ticker == "MSFT"
+
+    by_since = events_from_generation_db(tmp_path, since="2026-05-03T00:00:00+00:00")
+    assert len(by_since) == 1 and by_since[0].ticker == "MSFT"
+
+
 def test_format_report_renders_group_and_windows():
     from tradingagents.strategies.validation.models import (
         AggregateResult,

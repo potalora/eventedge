@@ -1,103 +1,56 @@
+"""Unified SQLite persistence for derived metrics-v2 records.
+
+Backed by ``GenerationDB`` (``generation.sqlite3``) via ``open_sqlite`` /
+``closing()`` with ``PRAGMA busy_timeout=10000``. Market-data bar-recovery
+and candidate-input-issue evidence live in
+``execution/recovery_evidence.py`` (``RecoveryEvidenceStore``).
+"""
+
 from __future__ import annotations
 
-import json
-import math
-import sqlite3
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
 from dataclasses import asdict, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
+import json
 from pathlib import Path
-from urllib.parse import quote
-from zoneinfo import ZoneInfo
+import sqlite3
 
+from tradingagents.strategies.execution.recovery_evidence import RecoveryEvidenceStore
 from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
+from tradingagents.strategies.state.generation_db import (
+    DEFAULT_BUSY_TIMEOUT_MS,
+    GenerationDB,
+)
 
 from .calendar import XNYSCalendar
 from .models import (
     CandidateBarRecoveryRecord,
     CandidateSignalIdentityBinding,
     CriticalGapMarker,
-    GOVERNED_BAR_RECOVERY_CONTRACT,
-    GOVERNED_SIP_RECOVERY_CONTRACT,
     GovernedBarRecoveryRecord,
     MetricEpoch,
     OutcomeRecord,
     StrategyHealthRecord,
 )
 
-_SCHEMA = """
-PRAGMA journal_mode=WAL;
-CREATE TABLE IF NOT EXISTS metric_epochs (
-  epoch_id TEXT PRIMARY KEY,
-  payload_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS outcomes (
-  outcome_id TEXT PRIMARY KEY,
-  epoch_id TEXT NOT NULL,
-  payload_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS outcome_inputs (
-  input_id TEXT PRIMARY KEY,
-  ticker TEXT NOT NULL,
-  session TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  UNIQUE (ticker, session)
-);
-CREATE TABLE IF NOT EXISTS strategy_health (
-  health_id TEXT PRIMARY KEY,
-  epoch_id TEXT NOT NULL,
-  session TEXT NOT NULL,
-  payload_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS critical_gap_markers (
-  marker_id TEXT PRIMARY KEY,
-  status TEXT NOT NULL,
-  gap_session TEXT NOT NULL,
-  payload_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS candidate_bar_recoveries (
-  recovery_id TEXT PRIMARY KEY,
-  epoch_id TEXT NOT NULL,
-  session TEXT NOT NULL,
-  payload_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS governed_bar_recoveries (
-  recovery_id TEXT PRIMARY KEY,
-  contract_version TEXT NOT NULL,
-  evidence_digest TEXT NOT NULL,
-  epoch_id TEXT NOT NULL,
-  session TEXT NOT NULL,
-  ticker TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  UNIQUE (epoch_id, session, ticker)
-);
-CREATE TABLE IF NOT EXISTS candidate_signal_identity_bindings (
-  binding_id TEXT PRIMARY KEY,
-  epoch_id TEXT NOT NULL,
-  session TEXT NOT NULL,
-  payload_json TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS candidate_input_issues (
-  issue_id TEXT PRIMARY KEY,
-  epoch_id TEXT NOT NULL,
-  session TEXT NOT NULL,
-  dependency_kind TEXT NOT NULL,
-  ticker TEXT NOT NULL,
-  payload_json TEXT NOT NULL,
-  UNIQUE (epoch_id, session, dependency_kind, ticker)
-);
-CREATE INDEX IF NOT EXISTS idx_candidate_bar_recoveries_epoch_session
-  ON candidate_bar_recoveries(epoch_id, session);
-CREATE INDEX IF NOT EXISTS idx_candidate_input_issues_epoch_session
-  ON candidate_input_issues(epoch_id, session);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_candidate_signal_identity_scope
-  ON candidate_signal_identity_bindings(epoch_id, session);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_critical_gap_pending
-  ON critical_gap_markers(status) WHERE status = 'pending';
-"""
+
+_AUXILIARY_METRIC_DDL: tuple[str, ...] = (
+    """CREATE TABLE IF NOT EXISTS outcome_inputs (
+        input_id TEXT PRIMARY KEY,
+        ticker TEXT NOT NULL,
+        session TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        UNIQUE (ticker, session)
+    )""",
+    """CREATE TABLE IF NOT EXISTS critical_gap_markers (
+        marker_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        gap_session TEXT NOT NULL,
+        payload_json TEXT NOT NULL
+    )""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_critical_gap_pending
+        ON critical_gap_markers(status) WHERE status = 'pending'""",
+)
 
 _CRITICAL_GAP_REASON = "critical_market_data_gap"
 _OUTCOME_GAP_REASONS = frozenset(
@@ -114,112 +67,68 @@ _MAX_GAP_TEXT = 256
 _MAX_GAP_DETAIL_TEXT = 4_096
 _MAX_GAP_AUDIT_ITEMS = 2_048
 _MAX_GAP_PAYLOAD_BYTES = 2_000_000
-_MAX_CANDIDATE_RECOVERY_TEXT = 256
-_MAX_CANDIDATE_RECOVERY_DECIMAL_TEXT = 128
-_MAX_CANDIDATE_RECOVERY_ATTEMPTS = 2
-_MAX_CANDIDATE_RECOVERY_SIGNALS = 64
-# Six exhaustive SEC windows can retain 10,000 filings each, repeated across
-# four default horizons. Keep every journal-only identity for immutable replay;
-# the independent byte budget bounds the serialized resource cost as well.
-_MAX_CANDIDATE_SIGNAL_IDENTITIES = 262_144
-_MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES = 64 * 1024 * 1024
-_MAX_GOVERNED_RECOVERY_TEXT = 4_096
-_MAX_GOVERNED_RECOVERY_ROWS = 7
-_MAX_GOVERNED_RECOVERY_COHORTS = 64
-_MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES = 100_000
-_MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES = 1_000_000
-_MAX_CANDIDATE_SESSION_RECORD_BYTES = 1_000_000
-_NEW_YORK = ZoneInfo("America/New_York")
-_CANDIDATE_ATTEMPT_KEYS = frozenset(
-    {
-        "ticker",
-        "session",
-        "attempt",
-        "source",
-        "fetched_at",
-        "open",
-        "high",
-        "low",
-        "close",
-        "validation_error",
-    }
-)
-_CANDIDATE_SIGNAL_IDENTITY_KEYS = frozenset({"event_key", "strategy"})
-_CANDIDATE_SIGNAL_BINDING_KEYS = frozenset(
-    {"horizon", "ticker", "event_key", "strategy"}
-)
 
 
 class MetricStore:
     """SQLite persistence for immutable, derived metrics-v2 records."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+    def __init__(
+        self,
+        db_or_path: GenerationDB | str | Path,
+        *,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    ) -> None:
         self._calendar = XNYSCalendar()
         self._read_only = False
         self._immutable = False
-        self._has_candidate_bar_recoveries = True
-        self._has_candidate_signal_identity_bindings = True
-        self._has_governed_bar_recoveries = True
-        self._has_candidate_input_issues = True
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._connect() as connection:
-            connection.executescript(_SCHEMA)
+        if isinstance(db_or_path, GenerationDB):
+            if db_or_path.readonly:
+                raise PermissionError(
+                    "cannot initialize writable MetricStore on readonly GenerationDB"
+                )
+            self.db = db_or_path
+        else:
+            self.db = GenerationDB(Path(db_or_path), busy_timeout_ms=busy_timeout_ms)
+        self.path = self.db.path
+        with self.db.transaction(immediate=True) as conn:
+            for stmt in _AUXILIARY_METRIC_DDL:
+                conn.execute(stmt)
+        self.recovery_evidence = RecoveryEvidenceStore(
+            self.db, read_only=False, busy_timeout_ms=busy_timeout_ms
+        )
 
     @classmethod
     def open_existing(
-        cls, path: str | Path, *, immutable: bool = False
-    ) -> "MetricStore":
-        """Open an existing metric store without schema or journal mutations."""
-        target = Path(path)
-        if not target.is_file():
-            raise FileNotFoundError(target)
+        cls,
+        db_or_path: GenerationDB | str | Path,
+        *,
+        immutable: bool = False,
+        busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_MS,
+    ) -> MetricStore:
+        """Open an existing metric store in strict read-only mode."""
+        if isinstance(db_or_path, GenerationDB):
+            db = db_or_path
+        else:
+            target = Path(db_or_path)
+            if not target.is_file():
+                raise FileNotFoundError(target)
+            db = GenerationDB.open_readonly(
+                target, busy_timeout_ms=busy_timeout_ms, immutable=immutable
+            )
         store = cls.__new__(cls)
-        store.path = target
+        store.db = db
+        store.path = db.path
         store._calendar = XNYSCalendar()
         store._read_only = True
-        store._immutable = bool(immutable)
-        with store._connect() as connection:
-            tables = {
-                row[0]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
-        required = {
-            "metric_epochs",
-            "outcomes",
-            "strategy_health",
-            "critical_gap_markers",
-        }
-        if not required <= tables:
-            raise ValueError("existing metric store schema is incomplete")
-        store._has_candidate_bar_recoveries = "candidate_bar_recoveries" in tables
-        store._has_candidate_signal_identity_bindings = (
-            "candidate_signal_identity_bindings" in tables
+        store._immutable = bool(immutable or db.immutable)
+        store.recovery_evidence = RecoveryEvidenceStore.open_existing(
+            db, immutable=store._immutable, busy_timeout_ms=busy_timeout_ms
         )
-        store._has_governed_bar_recoveries = "governed_bar_recoveries" in tables
-        store._has_candidate_input_issues = "candidate_input_issues" in tables
         return store
 
     @property
     def read_only(self) -> bool:
         return self._read_only
-
-    @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
-        if self._read_only:
-            encoded = quote(str(self.path.resolve()), safe="/")
-            immutable = "&immutable=1" if self._immutable else ""
-            connection = sqlite3.connect(f"file:{encoded}?mode=ro{immutable}", uri=True)
-            connection.execute("PRAGMA query_only=ON")
-        else:
-            connection = sqlite3.connect(self.path)
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
 
     @staticmethod
     def _json(record: object) -> str:
@@ -242,15 +151,14 @@ class MetricStore:
     def _outcome(payload: str) -> OutcomeRecord:
         data = json.loads(payload)
         if "analysis_status" not in data:
-            data.update(analysis_status="legacy_unknown", analysis_valid=False, analysis_admitted=False)
+            data.update(
+                analysis_status="legacy_unknown",
+                analysis_valid=False,
+                analysis_admitted=False,
+            )
         data["entry_session"] = date.fromisoformat(data["entry_session"])
         data["exit_session"] = date.fromisoformat(data["exit_session"])
-        for field in (
-            "entry_price",
-            "exit_price",
-            "raw_return",
-            "signed_return",
-        ):
+        for field in ("entry_price", "exit_price", "raw_return", "signed_return"):
             if data[field] is not None:
                 data[field] = Decimal(data[field])
         return OutcomeRecord(**data)
@@ -272,796 +180,132 @@ class MetricStore:
         return CriticalGapMarker(**data)
 
     @staticmethod
-    def _candidate_bar_recovery(payload: str) -> CandidateBarRecoveryRecord:
-        data = json.loads(payload)
-        data["session"] = date.fromisoformat(data["session"])
-        attempts: list[dict[str, object]] = []
-        for raw_attempt in data["attempts"]:
-            attempt = dict(raw_attempt)
-            attempt["session"] = date.fromisoformat(attempt["session"])
-            attempt["fetched_at"] = datetime.fromisoformat(attempt["fetched_at"])
-            for field in ("open", "high", "low", "close"):
-                if attempt[field] is not None:
-                    attempt[field] = Decimal(attempt[field])
-            attempts.append(attempt)
-        data["attempts"] = tuple(attempts)
-        data["signal_identities"] = tuple(
-            dict(identity) for identity in data["signal_identities"]
-        )
-        return CandidateBarRecoveryRecord(**data)
+    def _validate_limit(limit: int) -> None:
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("limit must be positive")
 
-    def _candidate_signal_identity_binding(
-        self,
+    @staticmethod
+    def _insert_immutable(
+        conn: sqlite3.Connection,
+        *,
+        table: str,
+        id_column: str,
+        record_id: str,
         payload: str,
-        *,
-        expected_scope: tuple[str, date] | None = None,
-        expected_binding_id: str | None = None,
-    ) -> CandidateSignalIdentityBinding:
-        if not isinstance(payload, str):
-            raise ValueError("candidate signal identity binding payload is invalid")
-        # Count bytes before JSON parsing without expanding a large Unicode
-        # document into a second, full UTF-8 allocation.
-        if len(payload) > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES:
-            raise ValueError("candidate signal identity binding payload exceeds bound")
-        byte_count = 0
-        for offset in range(0, len(payload), 8_192):
-            byte_count += len(payload[offset:offset + 8_192].encode("utf-8"))
-            if byte_count > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES:
-                raise ValueError("candidate signal identity binding payload exceeds bound")
-        try:
-            data = json.loads(payload)
-            if (
-                not isinstance(data, dict)
-                or set(data) != {"binding_id", "epoch_id", "session", "identities"}
-                or not isinstance(data["identities"], list)
-                or not all(isinstance(identity, dict) for identity in data["identities"])
-            ):
-                raise ValueError
-            data["session"] = date.fromisoformat(data["session"])
-            data["identities"] = tuple(data["identities"])
-            record = CandidateSignalIdentityBinding(**data)
-        except (KeyError, TypeError, ValueError):
-            raise ValueError("candidate signal identity binding payload is invalid") from None
-        self._validate_candidate_signal_identity_binding(record)
-        if expected_scope is not None and (record.epoch_id, record.session) != expected_scope:
-            raise ValueError("candidate signal identity binding scope is invalid")
-        if expected_binding_id is not None and record.binding_id != expected_binding_id:
-            raise ValueError("candidate signal identity binding identifier is invalid")
-        return record
-
-    @staticmethod
-    def _candidate_signal_identity_binding_payload(
-        record: CandidateSignalIdentityBinding,
-    ) -> str:
-        # Preserve _json's canonical bytes without asdict's deep copy or a
-        # complete oversized JSON/UTF-8 allocation before enforcing the budget.
-        document = {"binding_id": record.binding_id, "epoch_id": record.epoch_id,
-                    "session": record.session, "identities": record.identities}
-        encoder = json.JSONEncoder(sort_keys=True, separators=(",", ":"), default=str,
-                                   ensure_ascii=True)
-        encoded = bytearray()
-        for chunk in encoder.iterencode(document):
-            # ensure_ascii makes character count equal serialized UTF-8 bytes.
-            if len(encoded) + len(chunk) > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES:
-                raise ValueError("candidate signal identity binding payload exceeds bound")
-            encoded.extend(chunk.encode("ascii"))
-        return encoded.decode("ascii")
-
-    @staticmethod
-    def _candidate_input_issue(
-        row: tuple[object, ...],
-        *,
-        expected_issue_id: str | None = None,
-        expected_scope: tuple[str, date, str, str] | None = None,
-    ) -> CandidateInputIssue:
-        try:
-            issue_id, epoch_id, session, dependency_kind, ticker, payload = row
-            if not all(
-                isinstance(value, str)
-                for value in (issue_id, epoch_id, session, dependency_kind, ticker)
-            ):
-                raise ValueError
-        except (TypeError, ValueError) as error:
-            raise ValueError("candidate input issue payload is invalid") from error
-        payload = MetricStore._bounded_candidate_input_issue_payload(payload)
-        try:
-            data = json.loads(payload)
-            expected_fields = {
-                "issue_id",
-                "epoch_id",
-                "session",
-                "dependency_kind",
-                "reason_code",
-                "ticker",
-                "source",
-                "fetched_at",
-                "requested_history_digest",
-                "returned_history_digest",
-                "expected_sessions",
-                "observed_sessions",
-                "retryable",
-                "affected_signal_identities",
-                "affected_cohorts",
-            }
-            if not isinstance(data, dict) or set(data) != expected_fields:
-                raise ValueError
-            data["session"] = date.fromisoformat(data["session"])
-            data["fetched_at"] = datetime.fromisoformat(
-                data["fetched_at"].replace("Z", "+00:00")
-            )
-            data["expected_sessions"] = tuple(
-                date.fromisoformat(value) for value in data["expected_sessions"]
-            )
-            data["observed_sessions"] = tuple(
-                date.fromisoformat(value) for value in data["observed_sessions"]
-            )
-            data["affected_signal_identities"] = tuple(
-                dict(value) for value in data["affected_signal_identities"]
-            )
-            data["affected_cohorts"] = tuple(data["affected_cohorts"])
-            record = CandidateInputIssue.create(**data)
-        except (
-            AttributeError,
-            KeyError,
-            TypeError,
-            ValueError,
-            RecursionError,
-            json.JSONDecodeError,
-        ) as error:
-            raise ValueError("candidate input issue payload is invalid") from error
-        if record.canonical_payload() != payload:
-            raise ValueError("candidate input issue payload is not canonical")
-        if (
-            record.issue_id,
-            record.epoch_id,
-            record.session.isoformat(),
-            record.dependency_kind,
-            record.ticker,
-        ) != (issue_id, epoch_id, session, dependency_kind, ticker):
-            raise ValueError("candidate input issue metadata does not match payload")
-        if expected_issue_id is not None and record.issue_id != expected_issue_id:
-            raise ValueError("candidate input issue metadata does not match lookup")
-        if expected_scope is not None and (
-            record.epoch_id,
-            record.session,
-            record.dependency_kind,
-            record.ticker,
-        ) != (
-            expected_scope[0],
-            expected_scope[1],
-            expected_scope[2],
-            expected_scope[3].upper(),
-        ):
-            raise ValueError("candidate input issue metadata does not match lookup")
-        record.validate_integrity()
-        return record
-
-    @staticmethod
-    def _bounded_candidate_input_issue_payload(payload: object) -> str:
-        if not isinstance(payload, str):
-            raise ValueError("candidate input issue payload is invalid")
-        try:
-            payload_size = len(payload.encode("utf-8"))
-        except UnicodeError as error:
-            raise ValueError("candidate input issue payload is invalid") from error
-        if payload_size > _MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES:
-            raise ValueError("candidate input issue payload exceeds byte bound")
-        return payload
-
-    @staticmethod
-    def _governed_payload_data(payload: object) -> dict[str, object]:
-        if not isinstance(payload, str):
-            raise ValueError("governed bar recovery payload is invalid")
-        if len(payload.encode("utf-8")) > _MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES:
-            raise ValueError("governed bar recovery payload exceeds byte bound")
-        try:
-            data = json.loads(payload)
-        except (json.JSONDecodeError, RecursionError, TypeError, ValueError) as error:
-            raise ValueError("governed bar recovery payload is invalid") from error
-        record_fields = {
-            "recovery_id",
-            "contract_version",
-            "evidence_digest",
-            "epoch_id",
-            "session",
-            "ticker",
-            "original_daily",
-            "original_validation_error",
-            "expected_starts",
-            "observed_starts",
-            "intraday_rows",
-            "reconstructed_bar",
-            "final_validation_error",
-            "affected_cohort_ids",
-        }
-        if isinstance(data, dict) and data.get("contract_version") == GOVERNED_SIP_RECOVERY_CONTRACT:
-            record_fields |= {"yahoo_recovery_error", "alternate_daily"}
-        if not isinstance(data, dict) or set(data) != record_fields:
-            raise ValueError("governed bar recovery payload shape is invalid")
-        text_fields = (
-            "recovery_id",
-            "contract_version",
-            "evidence_digest",
-            "epoch_id",
-            "session",
-            "ticker",
-        )
-        if not all(isinstance(data[field], str) for field in text_fields):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        if data["original_validation_error"] is not None and not isinstance(
-            data["original_validation_error"], str
-        ):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        if data["final_validation_error"] is not None and not isinstance(
-            data["final_validation_error"], str
-        ):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        bar_keys = {"open", "high", "low", "close"}
-        original_keys = bar_keys | {"source", "fetched_at"}
-        row_keys = bar_keys | {"start", "fetched_at"}
-        reconstructed_keys = bar_keys | {"source"}
-
-        def scalar(value: object) -> bool:
-            return value is None or isinstance(value, (str, int, float, bool))
-
-        def shaped_mapping(value: object, keys: set[str]) -> bool:
-            return (
-                isinstance(value, dict)
-                and set(value) == keys
-                and all(scalar(item) for item in value.values())
-            )
-
-        if not shaped_mapping(data["original_daily"], original_keys):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        if not shaped_mapping(data["reconstructed_bar"], reconstructed_keys):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        if not isinstance(data["expected_starts"], list) or not all(
-            isinstance(item, str) for item in data["expected_starts"]
-        ):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        if not isinstance(data["observed_starts"], list) or not all(
-            isinstance(item, str) for item in data["observed_starts"]
-        ):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        if not isinstance(data["intraday_rows"], list) or not all(
-            shaped_mapping(row, row_keys) for row in data["intraday_rows"]
-        ):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        if not isinstance(data["affected_cohort_ids"], list) or not all(
-            isinstance(item, str) for item in data["affected_cohort_ids"]
-        ):
-            raise ValueError("governed bar recovery payload shape is invalid")
-        if data["contract_version"] == GOVERNED_SIP_RECOVERY_CONTRACT:
-            alternate_keys = bar_keys | {
-                "provider", "feed", "adjustment", "timeframe",
-                "request_start", "request_end", "response_symbol",
-                "response_timestamp", "fetched_at", "row_count",
-                "pagination_complete",
-            }
-            if (
-                not isinstance(data["yahoo_recovery_error"], str)
-                or not shaped_mapping(data["alternate_daily"], alternate_keys)
-            ):
-                raise ValueError("governed SIP recovery payload shape is invalid")
-        return data
-
-    def _governed_bar_recovery(
-        self,
-        row: tuple[object, ...],
-        *,
-        expected_scope: tuple[str, date, str] | None = None,
-        expected_recovery_id: str | None = None,
-    ) -> GovernedBarRecoveryRecord:
-        if len(row) != 7:
-            raise ValueError("governed bar recovery metadata is invalid")
-        (
-            stored_recovery_id,
-            stored_contract_version,
-            stored_evidence_digest,
-            stored_epoch_id,
-            stored_session,
-            stored_ticker,
-            payload,
-        ) = row
-        metadata = (
-            stored_recovery_id,
-            stored_contract_version,
-            stored_evidence_digest,
-            stored_epoch_id,
-            stored_session,
-            stored_ticker,
-        )
-        if not all(isinstance(value, str) for value in metadata):
-            raise ValueError("governed bar recovery metadata is invalid")
-        data = self._governed_payload_data(payload)
-        try:
-            record = GovernedBarRecoveryRecord.create(
-                contract_version=data["contract_version"],
-                epoch_id=data["epoch_id"],
-                session=date.fromisoformat(data["session"]),
-                ticker=data["ticker"],
-                original_daily=data["original_daily"],
-                original_validation_error=data["original_validation_error"],
-                expected_starts=data["expected_starts"],
-                observed_starts=data["observed_starts"],
-                intraday_rows=data["intraday_rows"],
-                reconstructed_bar=data["reconstructed_bar"],
-                final_validation_error=data["final_validation_error"],
-                affected_cohort_ids=data["affected_cohort_ids"],
-                evidence_digest=data["evidence_digest"],
-                recovery_id=data["recovery_id"],
-                yahoo_recovery_error=data.get("yahoo_recovery_error"),
-                alternate_daily=data.get("alternate_daily"),
-            )
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError("governed bar recovery payload is invalid") from error
-        if payload != record.canonical_payload():
-            raise ValueError("governed bar recovery payload is not canonical")
-        if metadata != (
-            record.recovery_id,
-            record.contract_version,
-            record.evidence_digest,
-            record.epoch_id,
-            record.session.isoformat(),
-            record.ticker,
-        ):
-            raise ValueError("governed bar recovery metadata does not match payload")
-        if (
-            expected_recovery_id is not None
-            and record.recovery_id != expected_recovery_id
-        ):
-            raise ValueError("governed bar recovery metadata does not match lookup")
-        if expected_scope is not None:
-            epoch_id, session, ticker = expected_scope
-            if (record.epoch_id, record.session, record.ticker) != (
-                epoch_id,
-                session,
-                ticker.upper(),
-            ):
-                raise ValueError("governed bar recovery metadata does not match lookup")
-        self._validate_governed_bar_recovery(record)
-        return record
-
-    @staticmethod
-    def _bounded_candidate_recovery_text(value: object) -> bool:
-        return (
-            isinstance(value, str)
-            and bool(value.strip())
-            and len(value) <= _MAX_CANDIDATE_RECOVERY_TEXT
-        )
-
-    def _validate_candidate_bar_recovery(
-        self, record: CandidateBarRecoveryRecord
+        values: tuple[object, ...],
+        insert_sql: str,
     ) -> None:
-        for value in (record.recovery_id, record.epoch_id):
-            if not self._bounded_candidate_recovery_text(value):
-                raise ValueError("candidate bar recovery identifier is invalid")
-        if not self._calendar.is_session(record.session):
-            raise ValueError(f"{record.session} is not an XNYS session")
-        if (
-            not self._bounded_candidate_recovery_text(record.ticker)
-            or record.ticker != record.ticker.upper()
-        ):
-            raise ValueError("candidate bar recovery ticker is invalid")
-        if record.outcome not in {"accepted", "recovered", "quarantined"}:
-            raise ValueError("candidate bar recovery outcome is invalid")
-        if not 1 <= len(record.attempts) <= _MAX_CANDIDATE_RECOVERY_ATTEMPTS:
-            raise ValueError("candidate bar recovery attempt evidence count is invalid")
-        for index, evidence in enumerate(record.attempts, start=1):
-            if (
-                not isinstance(evidence, dict)
-                or set(evidence) != _CANDIDATE_ATTEMPT_KEYS
-            ):
-                raise ValueError(
-                    "candidate bar recovery attempt evidence keys are invalid"
-                )
-            if (
-                evidence["ticker"] != record.ticker
-                or evidence["session"] != record.session
-            ):
-                raise ValueError(
-                    "candidate bar recovery attempt evidence scope is invalid"
-                )
-            if type(evidence["attempt"]) is not int or evidence["attempt"] != index:
-                raise ValueError(
-                    "candidate bar recovery attempt evidence order is invalid"
-                )
-            if not self._bounded_candidate_recovery_text(evidence["source"]):
-                raise ValueError(
-                    "candidate bar recovery attempt evidence source is invalid"
-                )
-            fetched_at = evidence["fetched_at"]
-            if (
-                not isinstance(fetched_at, datetime)
-                or fetched_at.tzinfo is None
-                or fetched_at.utcoffset() is None
-            ):
-                raise ValueError(
-                    "candidate bar recovery attempt evidence time is invalid"
-                )
-            for field in ("open", "high", "low", "close"):
-                value = evidence[field]
-                if value is not None and (
-                    not isinstance(value, Decimal)
-                    or not value.is_finite()
-                    or len(str(value)) > _MAX_CANDIDATE_RECOVERY_DECIMAL_TEXT
-                ):
+        row = conn.execute(
+            f"SELECT payload_json FROM {table} WHERE {id_column} = ?",
+            (record_id,),
+        ).fetchone()
+        if row is None:
+            conn.execute(insert_sql, values)
+            return
+        if row[0] != payload:
+            raise ValueError(
+                f"immutable {id_column} {record_id!r} has unequal payload"
+            )
+
+    # ------------------------------------------------------------------
+    # Metric Epochs
+    # ------------------------------------------------------------------
+
+    def save_epoch(self, epoch: MetricEpoch) -> None:
+        payload = self._json(epoch)
+        with self.db.transaction(immediate=True) as conn:
+            existing = conn.execute(
+                "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
+                (epoch.epoch_id,),
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != payload:
                     raise ValueError(
-                        "candidate bar recovery attempt evidence price is invalid"
+                        f"immutable epoch_id {epoch.epoch_id!r} has unequal payload"
                     )
-            error = evidence["validation_error"]
-            if error is not None and not self._bounded_candidate_recovery_text(error):
-                raise ValueError(
-                    "candidate bar recovery attempt evidence error is invalid"
-                )
-        if len(record.signal_identities) > _MAX_CANDIDATE_RECOVERY_SIGNALS:
-            raise ValueError(
-                "candidate bar recovery signal identity count exceeds bound"
-            )
-        for identity in record.signal_identities:
-            if (
-                not isinstance(identity, dict)
-                or set(identity) != _CANDIDATE_SIGNAL_IDENTITY_KEYS
-                or not all(
-                    self._bounded_candidate_recovery_text(value)
-                    for value in identity.values()
-                )
-            ):
-                raise ValueError("candidate bar recovery signal identity is invalid")
-
-    def _validate_candidate_signal_identity_binding(
-        self, record: CandidateSignalIdentityBinding
-    ) -> None:
-        for value in (record.binding_id, record.epoch_id):
-            if not self._bounded_candidate_recovery_text(value):
-                raise ValueError(
-                    "candidate signal identity binding identifier is invalid"
-                )
-        if not self._calendar.is_session(record.session):
-            raise ValueError(f"{record.session} is not an XNYS session")
-        if len(record.identities) > _MAX_CANDIDATE_SIGNAL_IDENTITIES:
-            raise ValueError("candidate signal identity binding exceeds bound")
-        canonical: list[tuple[str, str, str, str]] = []
-        for identity in record.identities:
-            if (
-                not isinstance(identity, dict)
-                or set(identity) != _CANDIDATE_SIGNAL_BINDING_KEYS
-                or not all(
-                    self._bounded_candidate_recovery_text(value)
-                    for value in identity.values()
-                )
-                or identity["ticker"] != identity["ticker"].upper()
-            ):
-                raise ValueError("candidate signal identity binding is invalid")
-            canonical.append(
+                return
+            if epoch.status != "open" or epoch.end_session is not None:
+                raise ValueError("new metric epoch must be open with no end session")
+            conn.execute(
+                """INSERT INTO metric_epochs (
+                       epoch_id, generation_id, schema_version, status,
+                       start_session, end_session, payload_json
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    identity["horizon"],
-                    identity["ticker"],
-                    identity["event_key"],
-                    identity["strategy"],
-                )
+                    epoch.epoch_id,
+                    epoch.generation_id,
+                    int(epoch.metric_schema_version),
+                    epoch.status,
+                    epoch.start_session.isoformat(),
+                    None,
+                    payload,
+                ),
             )
-        if canonical != sorted(set(canonical)):
-            raise ValueError("candidate signal identity binding is not canonical")
 
-    @staticmethod
-    def _bounded_governed_recovery_text(value: object) -> bool:
-        return (
-            isinstance(value, str)
-            and bool(value.strip())
-            and len(value) <= _MAX_GOVERNED_RECOVERY_TEXT
-        )
+    def load_epoch(self, epoch_id: str) -> MetricEpoch:
+        with self.db.connect(readonly=True) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
+                (epoch_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(epoch_id)
+        return self._epoch(row[0])
 
-    @classmethod
-    def _validate_governed_json_value(cls, value: object) -> None:
-        if isinstance(value, Mapping):
-            for key, item in value.items():
-                if not cls._bounded_governed_recovery_text(key):
-                    raise ValueError("governed bar recovery evidence key is invalid")
-                cls._validate_governed_json_value(item)
-            return
-        if isinstance(value, tuple):
-            for item in value:
-                cls._validate_governed_json_value(item)
-            return
-        if isinstance(value, str):
-            if len(value) > _MAX_GOVERNED_RECOVERY_TEXT:
-                raise ValueError("governed bar recovery evidence text is invalid")
-            return
-        if isinstance(value, bool) or value is None or isinstance(value, int):
-            return
-        if isinstance(value, float) and math.isfinite(value):
-            return
-        raise ValueError("governed bar recovery evidence value is invalid")
+    def current_epoch(self) -> MetricEpoch | None:
+        with self.db.connect(readonly=True) as conn:
+            row = conn.execute(
+                """SELECT payload_json FROM metric_epochs
+                   ORDER BY start_session DESC, epoch_id DESC LIMIT 1"""
+            ).fetchone()
+        return self._epoch(row[0]) if row else None
 
-    @staticmethod
-    def _governed_ohlc_values(
-        bar: object,
-    ) -> tuple[Decimal, Decimal, Decimal, Decimal] | None:
-        if not isinstance(bar, Mapping):
-            return None
-        try:
-            values = []
-            for field in ("open", "high", "low", "close"):
-                value = bar[field]
-                if isinstance(value, bool):
-                    return None
-                decimal = Decimal(str(value))
-                if not decimal.is_finite() or decimal <= 0:
-                    return None
-                values.append(decimal)
-        except (KeyError, TypeError, ValueError, ArithmeticError):
-            return None
-        return tuple(values)
+    def close_epoch(
+        self,
+        epoch_id: str,
+        end_session: date,
+        reason: str,
+        invalid: bool = False,
+    ) -> MetricEpoch:
+        if not self._calendar.is_session(end_session):
+            raise ValueError(f"{end_session} is not an XNYS session")
+        target_status = "invalid" if invalid else "closed"
+        with self.db.transaction(immediate=True) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
+                (epoch_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(epoch_id)
+            current = self._epoch(row[0])
+            updated = replace(
+                current,
+                end_session=end_session,
+                status=target_status,
+                boundary_reason=reason,
+            )
+            if current == updated:
+                return current
+            if current.status != "open":
+                raise ValueError(f"conflicting epoch closure for {epoch_id!r}")
+            if end_session < current.start_session:
+                raise ValueError("epoch end session cannot precede start session")
+            conn.execute(
+                """UPDATE metric_epochs
+                   SET status = ?, end_session = ?, payload_json = ?
+                   WHERE epoch_id = ?""",
+                (target_status, end_session.isoformat(), self._json(updated), epoch_id),
+            )
+            return updated
 
-    @classmethod
-    def _governed_ohlc_is_positive_and_coherent(cls, bar: object) -> bool:
-        values = cls._governed_ohlc_values(bar)
-        if values is None:
-            return False
-        opening, high, low, close = values
-        return (
-            high >= max(opening, close) and low <= min(opening, close) and high >= low
-        )
+    def invalidate_epoch(
+        self, epoch_id: str, end_session: date, reason: str
+    ) -> MetricEpoch:
+        return self.close_epoch(epoch_id, end_session, reason, invalid=True)
 
-    def _validate_governed_sip_recovery(
-        self, record: GovernedBarRecoveryRecord
-    ) -> None:
-        alternate = record.alternate_daily
-        if alternate is None:
-            raise ValueError("governed SIP evidence is missing")
-        if (
-            not record.epoch_id
-            or not record.ticker
-            or record.ticker != record.ticker.upper()
-            or not record.affected_cohort_ids
-            or len(record.affected_cohort_ids) > _MAX_GOVERNED_RECOVERY_COHORTS
-            or record.affected_cohort_ids != tuple(sorted(set(record.affected_cohort_ids)))
-            or any(not self._bounded_governed_recovery_text(c) for c in record.affected_cohort_ids)
-            or record.final_validation_error is not None
-            or record.original_validation_error != f"incoherent {record.ticker}/{record.session}"
-            or record.yahoo_recovery_error != f"invalid {record.ticker}/{record.session}"
-            or record.original_daily.get("source") != "yfinance"
-            or self._governed_ohlc_is_positive_and_coherent(record.original_daily)
-            or self._governed_ohlc_values(record.original_daily) is None
-        ):
-            raise ValueError("governed SIP recovery scope is invalid")
-        expected_alternate_keys = {
-            "provider", "feed", "adjustment", "timeframe", "request_start",
-            "request_end", "response_symbol", "response_timestamp", "fetched_at",
-            "open", "high", "low", "close", "row_count", "pagination_complete",
-        }
-        if set(alternate) != expected_alternate_keys or (
-            alternate["provider"] != "alpaca"
-            or alternate["feed"] != "sip"
-            or alternate["adjustment"] != "raw"
-            or alternate["timeframe"] != "1Day"
-            or alternate["response_symbol"] != record.ticker
-            or type(alternate["row_count"]) is not int
-            or alternate["row_count"] != 1
-            or alternate["pagination_complete"] is not True
-            or not self._governed_ohlc_is_positive_and_coherent(alternate)
-            or record.reconstructed_bar.get("source") != "alpaca-sip-1d-raw"
-            or self._governed_ohlc_values(alternate)
-            != self._governed_ohlc_values(record.reconstructed_bar)
-        ):
-            raise ValueError("governed SIP observation is invalid")
-        try:
-            close_at = self._calendar.session_close(record.session)
-            midnight = datetime.combine(record.session, datetime.min.time(), _NEW_YORK)
-            request_start = datetime.fromisoformat(str(alternate["request_start"]))
-            request_end = datetime.fromisoformat(str(alternate["request_end"]))
-            response_timestamp = datetime.fromisoformat(str(alternate["response_timestamp"]))
-            fetched_at = datetime.fromisoformat(str(alternate["fetched_at"]))
-            original_fetched_at = datetime.fromisoformat(str(record.original_daily["fetched_at"]))
-            if any(
-                stamp.tzinfo is None or stamp.utcoffset() is None
-                for stamp in (request_start, request_end, response_timestamp, fetched_at, original_fetched_at)
-            ):
-                raise ValueError("naive timestamp")
-            if (
-                request_start != midnight
-                or response_timestamp != midnight
-                or request_end < close_at
-                or request_end > fetched_at - timedelta(minutes=15)
-                or fetched_at < close_at + timedelta(minutes=15)
-                or fetched_at.astimezone(_NEW_YORK).date() != record.session
-                or original_fetched_at < close_at
-                or original_fetched_at > fetched_at
-            ):
-                raise ValueError("timestamp scope")
-        except (ValueError, TypeError, KeyError) as error:
-            raise ValueError("governed SIP timing is invalid") from error
-        try:
-            session_open = self._calendar.session_open(record.session).astimezone(_NEW_YORK)
-            session_close = close_at.astimezone(_NEW_YORK)
-            starts = []
-            cursor = session_open
-            while cursor < session_close:
-                starts.append(cursor.isoformat())
-                cursor += timedelta(hours=1)
-            if (
-                record.expected_starts != tuple(starts)
-                or record.observed_starts
-                != tuple(row["start"] for row in record.intraday_rows)
-                or len(record.intraday_rows) > len(starts)
-                or any(
-                    set(row) != {"start", "open", "high", "low", "close", "fetched_at"}
-                    or not self._governed_ohlc_is_positive_and_coherent(row)
-                    for row in record.intraday_rows
-                )
-            ):
-                raise ValueError("hourly evidence")
-        except (ValueError, TypeError, KeyError) as error:
-            raise ValueError("governed SIP Yahoo hourly evidence is invalid") from error
-
-    def _validate_governed_bar_recovery(
-        self, record: GovernedBarRecoveryRecord
-    ) -> None:
-        record.validate_integrity()
-        if record.contract_version == GOVERNED_SIP_RECOVERY_CONTRACT:
-            self._validate_governed_sip_recovery(record)
-            return
-        if record.contract_version != GOVERNED_BAR_RECOVERY_CONTRACT:
-            raise ValueError("governed bar recovery contract is unsupported")
-        if record.yahoo_recovery_error is not None or record.alternate_daily is not None:
-            raise ValueError("Yahoo recovery contains alternate evidence")
-        for value in (
-            record.recovery_id,
-            record.contract_version,
-            record.evidence_digest,
-            record.epoch_id,
-            record.ticker,
-        ):
-            if not self._bounded_governed_recovery_text(value):
-                raise ValueError("governed bar recovery identifier is invalid")
-        if record.ticker != record.ticker.upper():
-            raise ValueError("governed bar recovery ticker is invalid")
-        row_starts = tuple(row["start"] for row in record.intraday_rows)
-        try:
-            session_open = self._calendar.session_open(record.session).astimezone(
-                _NEW_YORK
-            )
-            session_close = self._calendar.session_close(record.session).astimezone(
-                _NEW_YORK
-            )
-        except ValueError as error:
-            raise ValueError(
-                "governed bar recovery interval schedule is invalid"
-            ) from error
-        derived_starts: list[str] = []
-        interval_start = session_open
-        while interval_start < session_close:
-            derived_starts.append(interval_start.isoformat())
-            interval_start += timedelta(hours=1)
-        if not record.expected_starts or (
-            record.expected_starts != record.observed_starts
-            or record.expected_starts != row_starts
-            or record.expected_starts != tuple(derived_starts)
-        ):
-            raise ValueError("governed bar recovery interval schedule is invalid")
-        if len(record.expected_starts) > _MAX_GOVERNED_RECOVERY_ROWS:
-            raise ValueError(
-                "governed bar recovery expected interval count exceeds bound"
-            )
-        if len(record.observed_starts) > _MAX_GOVERNED_RECOVERY_ROWS:
-            raise ValueError(
-                "governed bar recovery observed interval count exceeds bound"
-            )
-        if len(record.intraday_rows) > _MAX_GOVERNED_RECOVERY_ROWS:
-            raise ValueError("governed bar recovery intraday row count exceeds bound")
-        if len(record.affected_cohort_ids) > _MAX_GOVERNED_RECOVERY_COHORTS:
-            raise ValueError(
-                "governed bar recovery affected cohort count exceeds bound"
-            )
-        if record.expected_starts != tuple(sorted(set(record.expected_starts))):
-            raise ValueError("governed bar recovery expected starts are not canonical")
-        if record.observed_starts != tuple(sorted(set(record.observed_starts))):
-            raise ValueError("governed bar recovery observed starts are not canonical")
-        if not all(
-            self._bounded_governed_recovery_text(cohort_id)
-            for cohort_id in record.affected_cohort_ids
-        ):
-            raise ValueError("governed bar recovery affected cohort is invalid")
-        if record.affected_cohort_ids != tuple(sorted(set(record.affected_cohort_ids))):
-            raise ValueError("governed bar recovery affected cohorts are not canonical")
-        if set(record.original_daily) != {
-            "open",
-            "high",
-            "low",
-            "close",
-            "source",
-            "fetched_at",
-        }:
-            raise ValueError("governed bar recovery original daily evidence is invalid")
-        if set(record.reconstructed_bar) != {
-            "open",
-            "high",
-            "low",
-            "close",
-            "source",
-        }:
-            raise ValueError("governed bar recovery reconstructed evidence is invalid")
-        for row in record.intraday_rows:
-            if set(row) != {"start", "open", "high", "low", "close", "fetched_at"}:
-                raise ValueError("governed bar recovery intraday evidence is invalid")
-            if not self._governed_ohlc_is_positive_and_coherent(row):
-                raise ValueError(
-                    "governed bar recovery intraday evidence is incoherent"
-                )
-        original_values = self._governed_ohlc_values(record.original_daily)
-        if original_values is None:
-            raise ValueError("governed bar recovery original daily evidence is invalid")
-        if self._governed_ohlc_is_positive_and_coherent(record.original_daily):
-            raise ValueError(
-                "governed bar recovery original daily evidence is coherent"
-            )
-        if record.original_validation_error != (
-            f"incoherent {record.ticker}/{record.session.isoformat()}"
-        ):
-            raise ValueError(
-                "governed bar recovery original validation reason is invalid"
-            )
-        reconstructed_values = self._governed_ohlc_values(record.reconstructed_bar)
-        if (
-            reconstructed_values is None
-            or not self._governed_ohlc_is_positive_and_coherent(
-                record.reconstructed_bar
-            )
-        ):
-            raise ValueError(
-                "governed bar recovery reconstructed evidence is incoherent"
-            )
-        if record.original_daily["source"] != "yfinance":
-            raise ValueError("governed bar recovery original source is invalid")
-        if record.reconstructed_bar["source"] != "yfinance-60m-reconstruction":
-            raise ValueError("governed bar recovery reconstructed source is invalid")
-        original_open, original_high, original_low, original_close = original_values
-        (
-            reconstructed_open,
-            reconstructed_high,
-            reconstructed_low,
-            reconstructed_close,
-        ) = reconstructed_values
-        if original_open != reconstructed_open:
-            raise ValueError(
-                "governed bar recovery original open does not match reconstruction"
-            )
-        if original_close != reconstructed_close:
-            raise ValueError(
-                "governed bar recovery original close does not match reconstruction"
-            )
-        high_broken = original_high < max(original_open, original_close)
-        low_broken = original_low > min(original_open, original_close)
-        if high_broken == low_broken:
-            raise ValueError("governed bar recovery both envelope bounds are invalid")
-        if high_broken and original_low != reconstructed_low:
-            raise ValueError(
-                "governed bar recovery unbroken low does not match reconstruction"
-            )
-        if low_broken and original_high != reconstructed_high:
-            raise ValueError(
-                "governed bar recovery unbroken high does not match reconstruction"
-            )
-        intraday_values = [
-            self._governed_ohlc_values(row) for row in record.intraday_rows
-        ]
-        if any(values is None for values in intraday_values):  # pragma: no cover
-            raise ValueError("governed bar recovery intraday evidence is invalid")
-        first_open = intraday_values[0][0]
-        maximum_high = max(values[1] for values in intraday_values)
-        minimum_low = min(values[2] for values in intraday_values)
-        final_close = intraday_values[-1][3]
-        if (first_open, maximum_high, minimum_low, final_close) != reconstructed_values:
-            raise ValueError("governed bar recovery intraday aggregation is invalid")
-        if record.final_validation_error is not None:
-            raise ValueError("governed bar recovery final validation is not accepted")
-        self._validate_governed_json_value(record.original_daily)
-        self._validate_governed_json_value(record.reconstructed_bar)
-        self._validate_governed_json_value(record.intraday_rows)
-        payload_size = len(record.canonical_payload().encode("utf-8"))
-        if payload_size > _MAX_GOVERNED_RECOVERY_PAYLOAD_BYTES:
-            raise ValueError("governed bar recovery payload exceeds byte bound")
+    # ------------------------------------------------------------------
+    # Critical Gap Markers
+    # ------------------------------------------------------------------
 
     def _validate_critical_gap(self, marker: CriticalGapMarker) -> None:
         for label, value in (
@@ -1082,9 +326,7 @@ class MetricStore:
             raise ValueError("critical gap status is invalid")
         if marker.detail_status not in {"minimal", "ready", "legacy_unbound"}:
             raise ValueError("critical gap detail status is invalid")
-        if not isinstance(marker.affected_cohorts, dict):
-            raise ValueError("critical gap affected cohorts must be a mapping")
-        if not marker.affected_cohorts:
+        if not isinstance(marker.affected_cohorts, dict) or not marker.affected_cohorts:
             raise ValueError("critical gap affected cohorts are required")
         if len(marker.affected_cohorts) > _MAX_GAP_COHORTS:
             raise ValueError("critical gap affected cohort count exceeds bound")
@@ -1163,9 +405,7 @@ class MetricStore:
         if not set(marker.cohort_invalid_reasons) <= set(marker.affected_cohorts):
             raise ValueError("critical gap outcome cohort is not affected")
         audit_intents = marker.corporate_action_rejections
-        if len(set(marker.cohort_invalid_reasons) | set(audit_intents)) > (
-            _MAX_GAP_COHORTS
-        ):
+        if len(set(marker.cohort_invalid_reasons) | set(audit_intents)) > _MAX_GAP_COHORTS:
             raise ValueError("critical gap total cohort count exceeds bound")
         if not set(audit_intents) <= set(marker.affected_cohorts):
             raise ValueError("critical gap audit cohort is not affected")
@@ -1179,12 +419,12 @@ class MetricStore:
                 or set(intent) != {"actions", "governed_tickers", "errors"}
             ):
                 raise ValueError("critical gap corporate action intent is invalid")
-            actions = intent["actions"]
-            governed = intent["governed_tickers"]
-            errors = intent["errors"]
-            if not all(
-                isinstance(value, list) for value in (actions, governed, errors)
-            ):
+            actions, governed, errors = (
+                intent["actions"],
+                intent["governed_tickers"],
+                intent["errors"],
+            )
+            if not all(isinstance(v, list) for v in (actions, governed, errors)):
                 raise ValueError("critical gap corporate action lists are invalid")
             if not errors:
                 raise ValueError("critical gap corporate action errors are required")
@@ -1196,11 +436,11 @@ class MetricStore:
                     or len(ticker) > _MAX_GAP_TEXT
                 ):
                     raise ValueError("critical gap governed ticker is invalid")
-            for error in errors:
+            for err in errors:
                 if (
-                    not isinstance(error, str)
-                    or not error.strip()
-                    or len(error) > _MAX_GAP_DETAIL_TEXT
+                    not isinstance(err, str)
+                    or not err.strip()
+                    or len(err) > _MAX_GAP_DETAIL_TEXT
                 ):
                     raise ValueError("critical gap corporate action error is invalid")
             if governed != sorted(set(governed)) or errors != sorted(set(errors)):
@@ -1229,8 +469,8 @@ class MetricStore:
                     "source",
                     "fetched_at",
                 ):
-                    value = action[key]
-                    if not isinstance(value, str) or len(value) > _MAX_GAP_TEXT:
+                    val = action[key]
+                    if not isinstance(val, str) or len(val) > _MAX_GAP_TEXT:
                         raise ValueError(
                             "critical gap corporate action text is invalid"
                         )
@@ -1238,11 +478,11 @@ class MetricStore:
                     date.fromisoformat(action["session"])
                     datetime.fromisoformat(action["fetched_at"])
                     for key in ("ratio", "cash_per_share"):
-                        value = action[key]
-                        if value is not None:
-                            if not isinstance(value, str) or len(value) > _MAX_GAP_TEXT:
+                        val = action[key]
+                        if val is not None:
+                            if not isinstance(val, str) or len(val) > _MAX_GAP_TEXT:
                                 raise ValueError
-                            Decimal(value)
+                            Decimal(val)
                 except (TypeError, ValueError, ArithmeticError) as error:
                     raise ValueError(
                         "critical gap corporate action value is invalid"
@@ -1253,132 +493,18 @@ class MetricStore:
                     )
         if audit_items > _MAX_GAP_AUDIT_ITEMS:
             raise ValueError("critical gap corporate action item count exceeds bound")
-        payload_size = len(
-            json.dumps(
-                asdict(marker), sort_keys=True, separators=(",", ":"), default=str
-            ).encode("utf-8")
-        )
-        if payload_size > _MAX_GAP_PAYLOAD_BYTES:
+        if len(self._json(marker).encode("utf-8")) > _MAX_GAP_PAYLOAD_BYTES:
             raise ValueError("critical gap payload exceeds byte bound")
 
-    @staticmethod
-    def _insert_immutable(
-        connection: sqlite3.Connection,
-        *,
-        table: str,
-        id_column: str,
-        record_id: str,
-        payload: str,
-        values: tuple[object, ...],
-        insert_sql: str,
-    ) -> None:
-        row = connection.execute(
-            f"SELECT payload_json FROM {table} WHERE {id_column} = ?",
-            (record_id,),
-        ).fetchone()
-        if row is None:
-            connection.execute(insert_sql, values)
-            return
-        if row[0] != payload:
-            raise ValueError(f"immutable {id_column} {record_id!r} has unequal payload")
-
-    def save_epoch(self, epoch: MetricEpoch) -> None:
-        payload = self._json(epoch)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing = connection.execute(
-                "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
-                (epoch.epoch_id,),
-            ).fetchone()
-            if existing is not None:
-                if existing[0] != payload:
-                    raise ValueError(
-                        f"immutable epoch_id {epoch.epoch_id!r} has unequal payload"
-                    )
-                return
-            if epoch.status != "open" or epoch.end_session is not None:
-                raise ValueError("new metric epoch must be open with no end session")
-            connection.execute(
-                "INSERT INTO metric_epochs (epoch_id, payload_json) VALUES (?, ?)",
-                (epoch.epoch_id, payload),
-            )
-
-    def load_epoch(self, epoch_id: str) -> MetricEpoch:
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
-                (epoch_id,),
-            ).fetchone()
-        if row is None:
-            raise KeyError(epoch_id)
-        return self._epoch(row[0])
-
-    def current_epoch(self) -> MetricEpoch | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT payload_json
-                FROM metric_epochs
-                ORDER BY json_extract(payload_json, '$.start_session') DESC,
-                         epoch_id DESC
-                LIMIT 1
-                """
-            ).fetchone()
-        return self._epoch(row[0]) if row else None
-
-    def close_epoch(
-        self,
-        epoch_id: str,
-        end_session: date,
-        reason: str,
-        invalid: bool = False,
-    ) -> MetricEpoch:
-        if not self._calendar.is_session(end_session):
-            raise ValueError(f"{end_session} is not an XNYS session")
-        target_status = "invalid" if invalid else "closed"
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
-                "SELECT payload_json FROM metric_epochs WHERE epoch_id = ?",
-                (epoch_id,),
-            ).fetchone()
-            if row is None:
-                raise KeyError(epoch_id)
-            current = self._epoch(row[0])
-            updated = replace(
-                current,
-                end_session=end_session,
-                status=target_status,
-                boundary_reason=reason,
-            )
-            if current == updated:
-                return current
-            if current.status != "open":
-                raise ValueError(f"conflicting epoch closure for {epoch_id!r}")
-            if end_session < current.start_session:
-                raise ValueError("epoch end session cannot precede start session")
-            connection.execute(
-                "UPDATE metric_epochs SET payload_json = ? WHERE epoch_id = ?",
-                (self._json(updated), epoch_id),
-            )
-            return updated
-
-    def invalidate_epoch(
-        self, epoch_id: str, end_session: date, reason: str
-    ) -> MetricEpoch:
-        return self.close_epoch(epoch_id, end_session, reason, invalid=True)
-
     def begin_critical_gap(self, marker: CriticalGapMarker) -> CriticalGapMarker:
-        """Persist the minimal blocker before any provider-owned recovery detail."""
         self._validate_critical_gap(marker)
         if marker.status != "pending":
             raise ValueError("new critical gap marker must be pending")
         if marker.detail_status != "minimal":
             raise ValueError("new critical gap marker must be minimal")
         payload = self._json(marker)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
+        with self.db.transaction(immediate=True) as conn:
+            row = conn.execute(
                 "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
                 (marker.marker_id,),
             ).fetchone()
@@ -1390,12 +516,10 @@ class MetricStore:
                     f"critical gap marker {marker.marker_id!r} has unequal payload"
                 )
             try:
-                connection.execute(
-                    """
-                    INSERT INTO critical_gap_markers
-                      (marker_id, status, gap_session, payload_json)
-                    VALUES (?, ?, ?, ?)
-                    """,
+                conn.execute(
+                    """INSERT INTO critical_gap_markers
+                           (marker_id, status, gap_session, payload_json)
+                       VALUES (?, ?, ?, ?)""",
                     (
                         marker.marker_id,
                         marker.status,
@@ -1410,14 +534,12 @@ class MetricStore:
     def attach_critical_gap_details(
         self, marker: CriticalGapMarker
     ) -> CriticalGapMarker:
-        """Atomically attach bounded replay detail to an existing blocker."""
         self._validate_critical_gap(marker)
         if marker.status != "pending" or marker.detail_status != "ready":
             raise ValueError("critical gap recovery detail must be ready and pending")
         payload = self._json(marker)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
+        with self.db.transaction(immediate=True) as conn:
+            row = conn.execute(
                 "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
                 (marker.marker_id,),
             ).fetchone()
@@ -1452,15 +574,15 @@ class MetricStore:
                 )
             if current.detail_status != "minimal":
                 raise ValueError("critical gap blocker cannot accept recovery detail")
-            connection.execute(
+            conn.execute(
                 "UPDATE critical_gap_markers SET payload_json = ? WHERE marker_id = ?",
                 (payload, marker.marker_id),
             )
         return marker
 
     def load_critical_gap(self, marker_id: str) -> CriticalGapMarker:
-        with self._connect() as connection:
-            row = connection.execute(
+        with self.db.connect(readonly=True) as conn:
+            row = conn.execute(
                 "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
                 (marker_id,),
             ).fetchone()
@@ -1469,23 +591,22 @@ class MetricStore:
         return self._critical_gap(row[0])
 
     def pending_critical_gap(self) -> CriticalGapMarker | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT payload_json
-                FROM critical_gap_markers
-                WHERE status = 'pending'
-                ORDER BY gap_session, marker_id
-                LIMIT 1
-                """
+        with self.db.connect(readonly=True) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='critical_gap_markers'"
+            ).fetchone()
+            if exists is None:
+                return None
+            row = conn.execute(
+                """SELECT payload_json FROM critical_gap_markers
+                   WHERE status = 'pending'
+                   ORDER BY gap_session, marker_id LIMIT 1"""
             ).fetchone()
         return self._critical_gap(row[0]) if row else None
 
     def complete_critical_gap(self, marker_id: str) -> CriticalGapMarker:
-        """Durably complete a recovered marker; repeated completion is a no-op."""
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            row = connection.execute(
+        with self.db.transaction(immediate=True) as conn:
+            row = conn.execute(
                 "SELECT payload_json FROM critical_gap_markers WHERE marker_id = ?",
                 (marker_id,),
             ).fetchone()
@@ -1497,536 +618,82 @@ class MetricStore:
             if current.detail_status != "ready":
                 raise ValueError("critical gap recovery detail is not ready")
             completed = replace(current, status="completed")
-            connection.execute(
-                """
-                UPDATE critical_gap_markers
-                SET status = 'completed', payload_json = ?
-                WHERE marker_id = ?
-                """,
+            conn.execute(
+                """UPDATE critical_gap_markers
+                   SET status = 'completed', payload_json = ?
+                   WHERE marker_id = ?""",
                 (self._json(completed), marker_id),
             )
         return completed
 
-    def save_candidate_bar_recovery(self, record: CandidateBarRecoveryRecord) -> None:
-        self._validate_candidate_bar_recovery(record)
-        payload = self._json(record)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._insert_immutable(
-                connection,
-                table="candidate_bar_recoveries",
-                id_column="recovery_id",
-                record_id=record.recovery_id,
-                payload=payload,
-                values=(
-                    record.recovery_id,
-                    record.epoch_id,
-                    record.session.isoformat(),
-                    payload,
-                ),
-                insert_sql=(
-                    "INSERT INTO candidate_bar_recoveries "
-                    "(recovery_id, epoch_id, session, payload_json) "
-                    "VALUES (?, ?, ?, ?)"
-                ),
-            )
-
-    def save_governed_bar_recovery(self, record: GovernedBarRecoveryRecord) -> None:
-        self._validate_governed_bar_recovery(record)
-        payload = record.canonical_payload()
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing_by_id = connection.execute(
-                """
-                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
-                       session, ticker, payload_json
-                FROM governed_bar_recoveries
-                WHERE recovery_id = ?
-                """,
-                (record.recovery_id,),
-            ).fetchone()
-            if existing_by_id is not None:
-                existing = self._governed_bar_recovery(
-                    existing_by_id, expected_recovery_id=record.recovery_id
-                )
-                if existing != record:
-                    raise ValueError(
-                        f"immutable recovery_id {record.recovery_id!r} has unequal payload"
-                    )
-                return
-            scoped = connection.execute(
-                """
-                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
-                       session, ticker, payload_json
-                FROM governed_bar_recoveries
-                WHERE epoch_id = ? AND session = ? AND ticker = ?
-                """,
-                (record.epoch_id, record.session.isoformat(), record.ticker),
-            ).fetchone()
-            if scoped is not None:
-                self._governed_bar_recovery(
-                    scoped,
-                    expected_scope=(record.epoch_id, record.session, record.ticker),
-                )
-                raise ValueError(
-                    "immutable governed bar recovery scope has unequal payload"
-                )
-            self._insert_immutable(
-                connection,
-                table="governed_bar_recoveries",
-                id_column="recovery_id",
-                record_id=record.recovery_id,
-                payload=payload,
-                values=(
-                    record.recovery_id,
-                    record.contract_version,
-                    record.evidence_digest,
-                    record.epoch_id,
-                    record.session.isoformat(),
-                    record.ticker,
-                    payload,
-                    datetime.now().astimezone().isoformat(),
-                ),
-                insert_sql=(
-                    "INSERT INTO governed_bar_recoveries "
-                    "(recovery_id, contract_version, evidence_digest, epoch_id, "
-                    "session, ticker, payload_json, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                ),
-            )
-
-    def load_governed_bar_recovery(
-        self, *, epoch_id: str, session: date, ticker: str
-    ) -> GovernedBarRecoveryRecord | None:
-        if not self._has_governed_bar_recoveries:
-            return None
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
-                       session, ticker, payload_json
-                FROM governed_bar_recoveries
-                WHERE epoch_id = ? AND session = ? AND ticker = ?
-                """,
-                (epoch_id, session.isoformat(), ticker.upper()),
-            ).fetchone()
-        return (
-            self._governed_bar_recovery(
-                row,
-                expected_scope=(epoch_id, session, ticker),
-            )
-            if row
-            else None
-        )
-
-    def load_governed_bar_recovery_by_id(
-        self, recovery_id: str
-    ) -> GovernedBarRecoveryRecord | None:
-        if not self._has_governed_bar_recoveries:
-            return None
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT recovery_id, contract_version, evidence_digest, epoch_id,
-                       session, ticker, payload_json
-                FROM governed_bar_recoveries
-                WHERE recovery_id = ?
-                """,
-                (recovery_id,),
-            ).fetchone()
-        return (
-            self._governed_bar_recovery(row, expected_recovery_id=recovery_id)
-            if row
-            else None
-        )
-
-    def save_candidate_input_issue(self, record: CandidateInputIssue) -> None:
-        record.validate_integrity()
-        payload = self._bounded_candidate_input_issue_payload(
-            record.canonical_payload()
-        )
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            existing_by_id = connection.execute(
-                """
-                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
-                FROM candidate_input_issues
-                WHERE issue_id = ?
-                """,
-                (record.issue_id,),
-            ).fetchone()
-            if existing_by_id is not None:
-                existing = self._candidate_input_issue(
-                    existing_by_id, expected_issue_id=record.issue_id
-                )
-                if existing.canonical_payload() != payload:
-                    raise ValueError(
-                        f"immutable candidate input issue_id {record.issue_id!r} has unequal replay evidence"
-                    )
-                return
-            scoped = connection.execute(
-                """
-                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
-                FROM candidate_input_issues
-                WHERE epoch_id = ? AND session = ? AND dependency_kind = ? AND ticker = ?
-                """,
-                (
-                    record.epoch_id,
-                    record.session.isoformat(),
-                    record.dependency_kind,
-                    record.ticker,
-                ),
-            ).fetchone()
-            if scoped is not None:
-                self._candidate_input_issue(
-                    scoped,
-                    expected_scope=(
-                        record.epoch_id,
-                        record.session,
-                        record.dependency_kind,
-                        record.ticker,
-                    ),
-                )
-                raise ValueError(
-                    "immutable candidate input issue scope has unequal replay evidence"
-                )
-            connection.execute(
-                """
-                INSERT INTO candidate_input_issues
-                  (issue_id, epoch_id, session, dependency_kind, ticker, payload_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.issue_id,
-                    record.epoch_id,
-                    record.session.isoformat(),
-                    record.dependency_kind,
-                    record.ticker,
-                    payload,
-                ),
-            )
-
-    def load_candidate_input_issue(
-        self,
-        *,
-        epoch_id: str,
-        session: date,
-        dependency_kind: str,
-        ticker: str,
-    ) -> CandidateInputIssue | None:
-        if not self._has_candidate_input_issues:
-            return None
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
-                FROM candidate_input_issues
-                WHERE epoch_id = ? AND session = ? AND dependency_kind = ? AND ticker = ?
-                """,
-                (epoch_id, session.isoformat(), dependency_kind, ticker.upper()),
-            ).fetchone()
-        return (
-            self._candidate_input_issue(
-                row,
-                expected_scope=(epoch_id, session, dependency_kind, ticker),
-            )
-            if row
-            else None
-        )
-
-    def load_candidate_input_issue_by_id(
-        self, issue_id: str
-    ) -> CandidateInputIssue | None:
-        if not self._has_candidate_input_issues:
-            return None
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
-                FROM candidate_input_issues
-                WHERE issue_id = ?
-                """,
-                (issue_id,),
-            ).fetchone()
-        return (
-            self._candidate_input_issue(row, expected_issue_id=issue_id) if row else None
-        )
-
-    def read_candidate_input_issues(
-        self,
-        epoch_id: str,
-        session: date | None = None,
-        *,
-        limit: int = 1_000,
-    ) -> tuple[CandidateInputIssue, ...]:
-        self._validate_limit(limit)
-        if not self._has_candidate_input_issues:
-            return ()
-        clauses = ["epoch_id = ?"]
-        values: list[object] = [epoch_id]
-        if session is not None:
-            clauses.append("session = ?")
-            values.append(session.isoformat())
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT issue_id, epoch_id, session, dependency_kind, ticker, payload_json
-                FROM candidate_input_issues
-                WHERE {" AND ".join(clauses)}
-                ORDER BY session, dependency_kind, ticker, issue_id
-                LIMIT ?
-                """,
-                (*values, limit),
-            ).fetchall()
-        return tuple(self._candidate_input_issue(row) for row in rows)
-
-    def _complete_candidate_session_rows(
-        self, table: str, columns: str, epoch_id: str, session: date,
-        *, max_records: int,
-    ) -> list[tuple[object, ...]]:
-        """Read one complete execution scope, with bounds before materialization.
-
-        A ticker needs at least one of the bounded binding's identities. There
-        can be one recovery and two dependency issues per ticker. Reuse the
-        binding's independent serialized budget for each evidence collection.
-        Reporting/window readers deliberately retain their separate row limits.
-        """
-        if (
-            not self._bounded_candidate_recovery_text(epoch_id)
-            or epoch_id != epoch_id.strip()
-            or not isinstance(session, date)
-            or isinstance(session, datetime)
-            or not self._calendar.is_session(session)
-        ):
-            raise ValueError("candidate session evidence scope is invalid")
-        available = (self._has_candidate_bar_recoveries if table == "candidate_bar_recoveries"
-                     else self._has_candidate_input_issues)
-        if not available:
-            return []
-        with self._connect() as connection:
-            # SELECT alone does not begin a Python sqlite3 transaction. Hold
-            # the same read snapshot across budget checking and payload fetch.
-            connection.execute("BEGIN")
-            count, total_bytes, largest, invalid = connection.execute(
-                f"""SELECT COUNT(*), COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0),
-                           COALESCE(MAX(length(CAST(payload_json AS BLOB))), 0),
-                           COALESCE(SUM(typeof(payload_json) != 'text'), 0)
-                    FROM {table} WHERE epoch_id = ? AND session = ?""",
-                (epoch_id, session.isoformat()),
-            ).fetchone()
-            if (
-                count > max_records
-                or total_bytes > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES
-                or largest > _MAX_CANDIDATE_SESSION_RECORD_BYTES
-                or invalid
-            ):
-                raise ValueError("candidate session evidence exceeds bound or is invalid")
-            return connection.execute(
-                f"SELECT {columns} FROM {table} WHERE epoch_id = ? AND session = ? ORDER BY 1",
-                (epoch_id, session.isoformat()),
-            ).fetchall()
-
-    def read_session_candidate_input_issues(
-        self, epoch_id: str, session: date,
-    ) -> tuple[CandidateInputIssue, ...]:
-        """Return every validated issue for an exact execution session or fail."""
-        rows = self._complete_candidate_session_rows(
-            "candidate_input_issues",
-            "issue_id, epoch_id, session, dependency_kind, ticker, payload_json",
-            epoch_id, session, max_records=2 * _MAX_CANDIDATE_SIGNAL_IDENTITIES,
-        )
-        records = tuple(self._candidate_input_issue(row) for row in rows)
-        if any(record.epoch_id != epoch_id or record.session != session for record in records):
-            raise ValueError("candidate session issue scope is invalid")
-        return tuple(sorted(records, key=lambda record: (
-            record.session, record.dependency_kind, record.ticker, record.issue_id,
-        )))
-
-    def read_session_candidate_bar_recoveries(
-        self, epoch_id: str, session: date,
-    ) -> tuple[CandidateBarRecoveryRecord, ...]:
-        """Return every validated recovery for an exact execution session or fail."""
-        rows = self._complete_candidate_session_rows(
-            "candidate_bar_recoveries", "recovery_id, epoch_id, session, payload_json",
-            epoch_id, session, max_records=_MAX_CANDIDATE_SIGNAL_IDENTITIES,
-        )
-        records = []
-        tickers = set()
-        for recovery_id, row_epoch, row_session, payload in rows:
-            try:
-                record = self._candidate_bar_recovery(payload)
-                self._validate_candidate_bar_recovery(record)
-                canonical = self._json(record)
-            except (AttributeError, KeyError, TypeError, ValueError, RecursionError) as error:
-                raise ValueError("candidate session recovery payload is invalid") from error
-            if (
-                canonical != payload
-                or (record.recovery_id, record.epoch_id, record.session.isoformat())
-                != (recovery_id, row_epoch, row_session)
-                or record.epoch_id != epoch_id or record.session != session
-            ):
-                raise ValueError("candidate session recovery scope or canonical payload is invalid")
-            if record.ticker in tickers:
-                raise ValueError("candidate session recovery has duplicate ticker scope")
-            tickers.add(record.ticker)
-            records.append(record)
-        return tuple(sorted(records, key=lambda record: (
-            record.session, record.ticker, record.recovery_id,
-        )))
-
-    def read_candidate_bar_recoveries(
-        self,
-        epoch_id: str,
-        session: date | None = None,
-        *,
-        limit: int = 1_000,
-    ) -> tuple[CandidateBarRecoveryRecord, ...]:
-        self._validate_limit(limit)
-        if not self._has_candidate_bar_recoveries:
-            return ()
-        clauses = ["epoch_id = ?"]
-        values: list[object] = [epoch_id]
-        if session is not None:
-            clauses.append("session = ?")
-            values.append(session.isoformat())
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT payload_json
-                FROM candidate_bar_recoveries
-                WHERE {" AND ".join(clauses)}
-                ORDER BY session, json_extract(payload_json, '$.ticker'), recovery_id
-                LIMIT ?
-                """,
-                (*values, limit),
-            ).fetchall()
-        return tuple(self._candidate_bar_recovery(row[0]) for row in rows)
-
-    def read_candidate_bar_recovery_window(
-        self,
-        epoch_id: str,
-        *,
-        limit: int = 1_000,
-    ) -> tuple[tuple[CandidateBarRecoveryRecord, ...], int]:
-        """Return the newest bounded evidence and its complete durable count."""
-        self._validate_limit(limit)
-        if not self._has_candidate_bar_recoveries:
-            return (), 0
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT payload_json, COUNT(*) OVER () AS total_records
-                FROM candidate_bar_recoveries
-                WHERE epoch_id = ?
-                ORDER BY session DESC,
-                         json_extract(payload_json, '$.ticker') DESC,
-                         recovery_id DESC
-                LIMIT ?
-                """,
-                (epoch_id, limit),
-            ).fetchall()
-        if not rows:
-            return (), 0
-        return (
-            tuple(self._candidate_bar_recovery(row[0]) for row in rows),
-            int(rows[0][1]),
-        )
-
-    def save_candidate_signal_identity_binding(
-        self, record: CandidateSignalIdentityBinding
-    ) -> None:
-        self._validate_candidate_signal_identity_binding(record)
-        payload = self._candidate_signal_identity_binding_payload(record)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            self._insert_immutable(
-                connection,
-                table="candidate_signal_identity_bindings",
-                id_column="binding_id",
-                record_id=record.binding_id,
-                payload=payload,
-                values=(
-                    record.binding_id,
-                    record.epoch_id,
-                    record.session.isoformat(),
-                    payload,
-                ),
-                insert_sql=(
-                    "INSERT INTO candidate_signal_identity_bindings "
-                    "(binding_id, epoch_id, session, payload_json) "
-                    "VALUES (?, ?, ?, ?)"
-                ),
-            )
-
-    def read_candidate_signal_identity_binding(
-        self, epoch_id: str, session: date
-    ) -> CandidateSignalIdentityBinding | None:
-        if not self._has_candidate_signal_identity_bindings:
-            return None
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT binding_id, length(CAST(payload_json AS BLOB)),
-                       CASE WHEN length(CAST(payload_json AS BLOB)) <= ?
-                            THEN payload_json END
-                FROM candidate_signal_identity_bindings
-                WHERE epoch_id = ? AND session = ?
-                """,
-                (_MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES, epoch_id, session.isoformat()),
-            ).fetchone()
-        if row is None:
-            return None
-        if not self._bounded_candidate_recovery_text(row[0]):
-            raise ValueError("candidate signal identity binding identifier is invalid")
-        if row[1] > _MAX_CANDIDATE_SIGNAL_BINDING_PAYLOAD_BYTES:
-            raise ValueError("candidate signal identity binding payload exceeds bound")
-        return self._candidate_signal_identity_binding(
-            row[2], expected_scope=(epoch_id, session), expected_binding_id=row[0]
-        )
+    # ------------------------------------------------------------------
+    # Outcomes & Strategy Health
+    # ------------------------------------------------------------------
 
     def upsert_outcome(self, outcome: OutcomeRecord) -> None:
         payload = self._json(outcome)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self.db.transaction(immediate=True) as conn:
             self._insert_immutable(
-                connection,
+                conn,
                 table="outcomes",
                 id_column="outcome_id",
                 record_id=outcome.outcome_id,
                 payload=payload,
-                values=(outcome.outcome_id, outcome.epoch_id, payload),
+                values=(
+                    outcome.outcome_id,
+                    outcome.epoch_id,
+                    outcome.signal_id,
+                    outcome.strategy,
+                    outcome.ticker,
+                    outcome.entry_session.isoformat(),
+                    outcome.exit_session.isoformat(),
+                    int(outcome.holding_sessions),
+                    payload,
+                ),
                 insert_sql=(
-                    "INSERT INTO outcomes (outcome_id, epoch_id, payload_json) "
-                    "VALUES (?, ?, ?)"
+                    "INSERT INTO outcomes ("
+                    "outcome_id, epoch_id, signal_id, strategy, ticker, "
+                    "entry_session, exit_session, horizon_sessions, payload_json"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 ),
             )
 
     def save_outcome_input(self, ticker: str, session: date, record: dict) -> None:
-        """Freeze successful or failed diagnostic acquisition independently of P0."""
         identity = f"{ticker}/{session.isoformat()}"
-        payload = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        payload = json.dumps(
+            record, sort_keys=True, separators=(",", ":"), default=str, allow_nan=False
+        )
+        with self.db.transaction(immediate=True) as conn:
             self._insert_immutable(
-                connection, table="outcome_inputs", id_column="input_id", record_id=identity,
-                payload=payload, values=(identity, ticker, session.isoformat(), payload),
+                conn,
+                table="outcome_inputs",
+                id_column="input_id",
+                record_id=identity,
+                payload=payload,
+                values=(identity, ticker, session.isoformat(), payload),
                 insert_sql="INSERT INTO outcome_inputs VALUES (?, ?, ?, ?)",
             )
 
     def load_outcome_input(self, ticker: str, session: date) -> dict | None:
-        with self._connect() as connection:
-            if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outcome_inputs'").fetchone():
+        with self.db.connect(readonly=True) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='outcome_inputs'"
+            ).fetchone()
+            if exists is None:
                 return None
-            row = connection.execute("SELECT payload_json FROM outcome_inputs WHERE ticker=? AND session=?", (ticker, session.isoformat())).fetchone()
+            row = conn.execute(
+                "SELECT payload_json FROM outcome_inputs WHERE ticker = ? AND session = ?",
+                (ticker, session.isoformat()),
+            ).fetchone()
         return json.loads(row[0]) if row else None
 
     def outcome_ids(self) -> set[str]:
-        with self._connect() as connection:
-            return {row[0] for row in connection.execute("SELECT outcome_id FROM outcomes")}
+        with self.db.connect(readonly=True) as conn:
+            return {row[0] for row in conn.execute("SELECT outcome_id FROM outcomes")}
 
     def load_outcome(self, outcome_id: str) -> OutcomeRecord:
-        with self._connect() as connection:
-            row = connection.execute(
+        with self.db.connect(readonly=True) as conn:
+            row = conn.execute(
                 "SELECT payload_json FROM outcomes WHERE outcome_id = ?",
                 (outcome_id,),
             ).fetchone()
@@ -2037,25 +704,25 @@ class MetricStore:
     def read_outcomes(
         self, epoch_id: str, *, limit: int | None = None
     ) -> tuple[OutcomeRecord, ...]:
-        """Read the complete epoch by default; explicit limits are opt-in views."""
         if limit is not None:
             self._validate_limit(limit)
-        sql = """SELECT payload_json FROM outcomes WHERE epoch_id = ?
-                 ORDER BY json_extract(payload_json, '$.exit_session'), outcome_id"""
-        parameters: tuple[object, ...] = (epoch_id,)
+        sql = (
+            "SELECT payload_json FROM outcomes WHERE epoch_id = ? "
+            "ORDER BY exit_session, outcome_id"
+        )
+        params: tuple[object, ...] = (epoch_id,)
         if limit is not None:
             sql += " LIMIT ?"
-            parameters += (limit,)
-        with self._connect() as connection:
-            rows = connection.execute(sql, parameters).fetchall()
+            params += (limit,)
+        with self.db.connect(readonly=True) as conn:
+            rows = conn.execute(sql, params).fetchall()
         return tuple(self._outcome(row[0]) for row in rows)
 
     def save_strategy_health(self, health: StrategyHealthRecord) -> None:
         payload = self._json(health)
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self.db.transaction(immediate=True) as conn:
             self._insert_immutable(
-                connection,
+                conn,
                 table="strategy_health",
                 id_column="health_id",
                 record_id=health.health_id,
@@ -2064,18 +731,20 @@ class MetricStore:
                     health.health_id,
                     health.epoch_id,
                     health.session.isoformat(),
+                    health.strategy,
+                    health.status,
                     payload,
                 ),
                 insert_sql=(
-                    "INSERT INTO strategy_health "
-                    "(health_id, epoch_id, session, payload_json) "
-                    "VALUES (?, ?, ?, ?)"
+                    "INSERT INTO strategy_health ("
+                    "health_id, epoch_id, session, strategy, status, payload_json"
+                    ") VALUES (?, ?, ?, ?, ?, ?)"
                 ),
             )
 
     def load_strategy_health(self, health_id: str) -> StrategyHealthRecord:
-        with self._connect() as connection:
-            row = connection.execute(
+        with self.db.connect(readonly=True) as conn:
+            row = conn.execute(
                 "SELECT payload_json FROM strategy_health WHERE health_id = ?",
                 (health_id,),
             ).fetchone()
@@ -2100,20 +769,126 @@ class MetricStore:
             clauses.append("session = ?")
             values.append(session.isoformat())
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT payload_json
-                FROM strategy_health
-                {where}
-                ORDER BY session, health_id
-                LIMIT ?
-                """,
+        with self.db.connect(readonly=True) as conn:
+            rows = conn.execute(
+                f"SELECT payload_json FROM strategy_health {where} "
+                "ORDER BY session, health_id LIMIT ?",
                 (*values, limit),
             ).fetchall()
         return tuple(self._health(row[0]) for row in rows)
 
-    @staticmethod
-    def _validate_limit(limit: int) -> None:
-        if limit <= 0:
-            raise ValueError("limit must be positive")
+    # ------------------------------------------------------------------
+    # Thin delegators to RecoveryEvidenceStore (for existing callers)
+    # ------------------------------------------------------------------
+
+    def save_candidate_bar_recovery(
+        self, record: CandidateBarRecoveryRecord
+    ) -> None:
+        self.recovery_evidence.save_candidate_bar_recovery(record)
+
+    def save_governed_bar_recovery(self, record: GovernedBarRecoveryRecord) -> None:
+        self.recovery_evidence.save_governed_bar_recovery(record)
+
+    def _validate_governed_bar_recovery(
+        self, record: GovernedBarRecoveryRecord
+    ) -> None:
+        evidence = getattr(self, "recovery_evidence", None)
+        if evidence is not None:
+            evidence._validate_governed_bar_recovery(record)
+            return
+        validator = RecoveryEvidenceStore.__new__(RecoveryEvidenceStore)
+        validator._calendar = getattr(self, "_calendar", XNYSCalendar())
+        validator._validate_governed_bar_recovery(record)
+
+    def load_governed_bar_recovery(
+        self, *, epoch_id: str, session: date, ticker: str
+    ) -> GovernedBarRecoveryRecord | None:
+        return self.recovery_evidence.load_governed_bar_recovery(
+            epoch_id=epoch_id, session=session, ticker=ticker
+        )
+
+    def load_governed_bar_recovery_by_id(
+        self, recovery_id: str
+    ) -> GovernedBarRecoveryRecord | None:
+        return self.recovery_evidence.load_governed_bar_recovery_by_id(recovery_id)
+
+    def save_candidate_input_issue(self, record: CandidateInputIssue) -> None:
+        self.recovery_evidence.save_candidate_input_issue(record)
+
+    def load_candidate_input_issue(
+        self,
+        *,
+        epoch_id: str,
+        session: date,
+        dependency_kind: str,
+        ticker: str,
+    ) -> CandidateInputIssue | None:
+        return self.recovery_evidence.load_candidate_input_issue(
+            epoch_id=epoch_id,
+            session=session,
+            dependency_kind=dependency_kind,
+            ticker=ticker,
+        )
+
+    def load_candidate_input_issue_by_id(
+        self, issue_id: str
+    ) -> CandidateInputIssue | None:
+        return self.recovery_evidence.load_candidate_input_issue_by_id(issue_id)
+
+    def read_candidate_input_issues(
+        self,
+        epoch_id: str,
+        session: date | None = None,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[CandidateInputIssue, ...]:
+        return self.recovery_evidence.read_candidate_input_issues(
+            epoch_id, session, limit=limit
+        )
+
+    def read_session_candidate_input_issues(
+        self, epoch_id: str, session: date
+    ) -> tuple[CandidateInputIssue, ...]:
+        return self.recovery_evidence.read_session_candidate_input_issues(
+            epoch_id, session
+        )
+
+    def read_session_candidate_bar_recoveries(
+        self, epoch_id: str, session: date
+    ) -> tuple[CandidateBarRecoveryRecord, ...]:
+        return self.recovery_evidence.read_session_candidate_bar_recoveries(
+            epoch_id, session
+        )
+
+    def read_candidate_bar_recoveries(
+        self,
+        epoch_id: str,
+        session: date | None = None,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[CandidateBarRecoveryRecord, ...]:
+        return self.recovery_evidence.read_candidate_bar_recoveries(
+            epoch_id, session, limit=limit
+        )
+
+    def read_candidate_bar_recovery_window(
+        self,
+        epoch_id: str,
+        *,
+        limit: int = 1_000,
+    ) -> tuple[tuple[CandidateBarRecoveryRecord, ...], int]:
+        return self.recovery_evidence.read_candidate_bar_recovery_window(
+            epoch_id, limit=limit
+        )
+
+    def save_candidate_signal_identity_binding(
+        self, record: CandidateSignalIdentityBinding
+    ) -> None:
+        self.recovery_evidence.save_candidate_signal_identity_binding(record)
+
+    def read_candidate_signal_identity_binding(
+        self, epoch_id: str, session: date
+    ) -> CandidateSignalIdentityBinding | None:
+        return self.recovery_evidence.read_candidate_signal_identity_binding(
+            epoch_id, session
+        )

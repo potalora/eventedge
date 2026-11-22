@@ -8,7 +8,10 @@ import sqlite3
 
 import pytest
 
+import tradingagents.strategies.execution.recovery_evidence as recovery_evidence_module
 import tradingagents.strategies.metrics.store as metrics_store_module
+from tradingagents.strategies.execution.recovery_evidence import RecoveryEvidenceStore
+from tradingagents.strategies.state.generation_db import ALL_TABLES, GenerationDB
 from tradingagents.strategies.metrics.models import (
     CandidateBarRecoveryRecord,
     CandidateSignalIdentityBinding,
@@ -326,13 +329,13 @@ def test_candidate_input_issue_read_rejects_oversized_payload_before_json_parse(
     issue = _candidate_input_issue()
     store.save_candidate_input_issue(issue)
     monkeypatch.setattr(
-        metrics_store_module, "_MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES", 1_000
+        recovery_evidence_module, "_MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES", 1_000
     )
     with sqlite3.connect(store.path) as connection:
         connection.execute(
             "UPDATE candidate_input_issues SET payload_json = ? WHERE issue_id = ?",
             (
-                " " * (metrics_store_module._MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES + 1),
+                " " * (recovery_evidence_module._MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES + 1),
                 issue.issue_id,
             ),
         )
@@ -362,7 +365,7 @@ def test_candidate_input_issue_save_rejects_oversized_payload_before_insert(
     store = MetricStore(tmp_path / "metrics.sqlite3")
     issue = _candidate_input_issue()
     monkeypatch.setattr(
-        metrics_store_module, "_MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES", 1
+        recovery_evidence_module, "_MAX_CANDIDATE_INPUT_ISSUE_PAYLOAD_BYTES", 1
     )
 
     with pytest.raises(ValueError, match="payload exceeds byte bound"):
@@ -391,17 +394,17 @@ def test_candidate_input_issue_reads_are_bounded_and_deterministic(tmp_path) -> 
     ) == (first,)
 
 
-def test_legacy_read_only_store_has_no_candidate_input_issues(tmp_path) -> None:
-    path = tmp_path / "legacy-metrics.sqlite3"
-    with sqlite3.connect(path) as connection:
-        _legacy_schema(connection)
+def test_readonly_generation_db_has_empty_candidate_input_issues_without_writes(
+    tmp_path,
+) -> None:
+    db = GenerationDB.for_state_dir(tmp_path)
+    store = MetricStore.open_existing(db.path)
 
-    store = MetricStore.open_existing(path)
-
-    assert store.read_candidate_input_issues("legacy-epoch") == ()
+    assert store.read_only
+    assert store.read_candidate_input_issues("epoch-1") == ()
     assert (
         store.load_candidate_input_issue(
-            epoch_id="legacy-epoch",
+            epoch_id="epoch-1",
             session=date(2026, 8, 3),
             dependency_kind="reference_bar",
             ticker="ALX",
@@ -456,85 +459,34 @@ def test_governed_bar_recovery_rejects_mismatched_supplied_identifiers() -> None
 
 
 def test_open_existing_reads_governed_recovery_without_creating_tables(tmp_path) -> None:
-    path = tmp_path / "existing-metrics.sqlite3"
+    db = GenerationDB.for_state_dir(tmp_path)
     record = governed_recovery_record("epoch-1")
-    with sqlite3.connect(path) as connection:
-        _legacy_schema(connection)
-        connection.execute(
-            """
-            CREATE TABLE governed_bar_recoveries (
-                recovery_id TEXT PRIMARY KEY,
-                contract_version TEXT NOT NULL,
-                evidence_digest TEXT NOT NULL,
-                epoch_id TEXT NOT NULL,
-                session TEXT NOT NULL,
-                ticker TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE (epoch_id, session, ticker)
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO governed_bar_recoveries
-              (recovery_id, contract_version, evidence_digest, epoch_id, session,
-               ticker, payload_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record.recovery_id,
-                record.contract_version,
-                record.evidence_digest,
-                record.epoch_id,
-                record.session.isoformat(),
-                record.ticker,
-                record.canonical_payload(),
-                record.original_daily["fetched_at"],
-            ),
-        )
+    RecoveryEvidenceStore(db).save_governed_bar_recovery(record)
+    before_tables = db.table_names()
 
-    store = MetricStore.open_existing(path)
+    store = MetricStore.open_existing(db.path)
 
+    assert store.read_only
     assert store.load_governed_bar_recovery_by_id(record.recovery_id) == record
-    with sqlite3.connect(path) as connection:
-        assert {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        } == {
-            "metric_epochs",
-            "outcomes",
-            "strategy_health",
-            "critical_gap_markers",
-            "governed_bar_recoveries",
-        }
+    assert db.table_names() == before_tables
 
 
-def test_open_existing_missing_governed_table_returns_no_record_without_migration(
+def test_open_existing_missing_governed_record_returns_none_without_migration(
     tmp_path,
 ) -> None:
-    path = tmp_path / "legacy-metrics.sqlite3"
-    with sqlite3.connect(path) as connection:
-        _legacy_schema(connection)
+    db = GenerationDB.for_state_dir(tmp_path)
+    before_tables = db.table_names()
 
-    store = MetricStore.open_existing(path)
+    store = MetricStore.open_existing(db.path)
 
     assert (
         store.load_governed_bar_recovery(
-            epoch_id="legacy-epoch", session=date(2026, 8, 10), ticker="ESS"
+            epoch_id="epoch-1", session=date(2026, 8, 10), ticker="ESS"
         )
         is None
     )
     assert store.load_governed_bar_recovery_by_id("missing") is None
-    with sqlite3.connect(path) as connection:
-        assert "governed_bar_recoveries" not in {
-            row[0]
-            for row in connection.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
+    assert db.table_names() == before_tables == ALL_TABLES
 
 
 def test_governed_recovery_storage_does_not_change_metrics_schema_version() -> None:
@@ -747,13 +699,13 @@ def test_governed_loads_fail_closed_on_tampered_persisted_metadata(
     store.save_governed_bar_recovery(record)
     with sqlite3.connect(store.path) as connection:
         payload = connection.execute(
-            "SELECT payload_json FROM governed_bar_recoveries"
+            "SELECT payload_json FROM bar_recoveries"
         ).fetchone()[0]
         connection.execute(
-            f"UPDATE governed_bar_recoveries SET {column} = ?", (value,)
+            f"UPDATE bar_recoveries SET {column} = ?", (value,)
         )
         assert connection.execute(
-            "SELECT payload_json FROM governed_bar_recoveries"
+            "SELECT payload_json FROM bar_recoveries"
         ).fetchone()[0] == payload
 
     recovery_id = value if column == "recovery_id" else record.recovery_id
@@ -781,7 +733,7 @@ def test_governed_load_rejects_malformed_or_unbounded_persisted_payload(
     store.save_governed_bar_recovery(record)
     with sqlite3.connect(store.path) as connection:
         connection.execute(
-            "UPDATE governed_bar_recoveries SET payload_json = ?", (payload,)
+            "UPDATE bar_recoveries SET payload_json = ?", (payload,)
         )
 
     with pytest.raises(ValueError, match="payload"):
@@ -824,7 +776,7 @@ def test_governed_recovery_rejects_unsupported_contract_on_save_and_load(tmp_pat
     with sqlite3.connect(store.path) as connection:
         connection.execute(
             """
-            UPDATE governed_bar_recoveries
+            UPDATE bar_recoveries
             SET recovery_id = ?, contract_version = ?, evidence_digest = ?,
                 payload_json = ?
             """,
@@ -918,7 +870,7 @@ def test_governed_idempotent_save_revalidates_existing_metadata(tmp_path) -> Non
     store.save_governed_bar_recovery(record)
     with sqlite3.connect(store.path) as connection:
         connection.execute(
-            "UPDATE governed_bar_recoveries SET contract_version = 'corrupt'"
+            "UPDATE bar_recoveries SET contract_version = 'corrupt'"
         )
 
     with pytest.raises(ValueError, match="metadata"):
@@ -1072,26 +1024,14 @@ def test_candidate_bar_recovery_rejects_unbounded_evidence(tmp_path) -> None:
         )
 
 
-def test_legacy_read_only_store_has_no_candidate_bar_recoveries(tmp_path) -> None:
-    path = tmp_path / "legacy-metrics.sqlite3"
-    with sqlite3.connect(path) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE metric_epochs (epoch_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL);
-            CREATE TABLE outcomes (outcome_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, payload_json TEXT NOT NULL);
-            CREATE TABLE strategy_health (health_id TEXT PRIMARY KEY, epoch_id TEXT NOT NULL, session TEXT NOT NULL, payload_json TEXT NOT NULL);
-            CREATE TABLE critical_gap_markers (marker_id TEXT PRIMARY KEY, status TEXT NOT NULL, gap_session TEXT NOT NULL, payload_json TEXT NOT NULL);
-            """
-        )
-
-    store = MetricStore.open_existing(path)
+def test_readonly_generation_db_has_no_candidate_bar_recoveries(tmp_path) -> None:
+    db = GenerationDB.for_state_dir(tmp_path)
+    store = MetricStore.open_existing(db.path)
 
     assert store.read_only
-    assert store.read_candidate_bar_recoveries("legacy-epoch") == ()
+    assert store.read_candidate_bar_recoveries("epoch-1") == ()
     assert (
-        store.read_candidate_signal_identity_binding(
-            "legacy-epoch", date(2026, 8, 3)
-        )
+        store.read_candidate_signal_identity_binding("epoch-1", date(2026, 8, 3))
         is None
     )
 

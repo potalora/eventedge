@@ -15,12 +15,13 @@ from tradingagents.strategies.execution import (
     SignalRecord,
     stable_id,
 )
+from tradingagents.strategies.state.generation_db import GenerationDB
+from tradingagents.strategies.state.ledger import connection as ledger_connection
 from tradingagents.strategies.state.portfolio_ledger import (
     LedgerConflictError,
     MissingMarkError,
     PortfolioLedger,
 )
-from tradingagents.strategies.state import portfolio_ledger
 
 
 UTC = timezone.utc
@@ -33,7 +34,6 @@ REQUIRED_TABLES = {
     "order_intents",
     "intent_signals",
     "order_status_transitions",
-    "external_orders",
     "fills",
     "fill_costs",
     "lots",
@@ -44,10 +44,12 @@ REQUIRED_TABLES = {
     "borrow_accruals",
     "financing_accruals",
     "dividend_events",
+    "dividend_receivables",
     "fee_events",
     "marks",
     "account_snapshots",
     "benchmark_observations",
+    "policy_audit_records",
 }
 
 
@@ -295,9 +297,10 @@ def test_single_epoch_signal_provenance_returns_fill_from_exactly_one_epoch(tmp_
         ledger.stage_intent(intent)
         with ledger.transaction() as connection:
             connection.execute(
-                "INSERT INTO fills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO fills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     "single-epoch-fill",
+                    ledger.cohort_id,
                     intent.intent_id,
                     "buy",
                     session.isoformat(),
@@ -362,9 +365,9 @@ def test_constructor_closes_connection_when_initialization_fails(monkeypatch, tm
         raise RuntimeError("initialization failure")
 
     monkeypatch.setattr(
-        portfolio_ledger.sqlite3, "connect", lambda *_args, **_kwargs: connection
+        ledger_connection, "_open_ledger_connection", lambda *_args, **_kwargs: connection
     )
-    monkeypatch.setattr(PortfolioLedger, "_initialize", fail_initialize)
+    monkeypatch.setattr(PortfolioLedger, "_initialize_cohort", fail_initialize)
 
     with pytest.raises(RuntimeError, match="initialization failure"):
         PortfolioLedger(
@@ -448,9 +451,10 @@ def test_typed_ordered_reads_filter_sqlite_rows_by_session_and_epoch(tmp_path):
         ledger.stage_intent(intent)
         with ledger.transaction() as connection:
             connection.execute(
-                """INSERT INTO fills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO fills VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     "fill-1",
+                    ledger.cohort_id,
                     intent.intent_id,
                     "buy",
                     session.isoformat(),
@@ -497,10 +501,9 @@ def test_typed_ordered_reads_filter_sqlite_rows_by_session_and_epoch(tmp_path):
                 ),
             )
             connection.execute(
-                """INSERT INTO benchmark_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO benchmark_observations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     "benchmark-1",
-                    ledger.cohort_id,
                     "epoch-1",
                     session.isoformat(),
                     "SPY",
@@ -651,3 +654,156 @@ def test_mark_requires_every_open_lot_to_have_exact_raw_session_bar(tmp_path):
             )
     finally:
         ledger.close()
+
+
+def test_multiple_cohorts_share_one_generation_db_with_full_isolation(tmp_path):
+    db = GenerationDB.for_state_dir(tmp_path)
+    cohort_a = PortfolioLedger(db, "horizon_30d_size_5k", Decimal("5000.00"))
+    cohort_b = PortfolioLedger(db, "horizon_30d_size_10k", Decimal("10000.00"))
+    session = date(2026, 8, 3)
+    ts = datetime(2026, 8, 3, 22, tzinfo=UTC)
+    sig = _signal()
+    try:
+        # Shared signal recorded by both cohorts is idempotent
+        cohort_a.record_signal_with_journal(
+            sig, {"score": 0.85, "strategy": "earnings_call"}, ts, {"eligible": True}
+        )
+        cohort_b.record_signal_with_journal(
+            sig, {"score": 0.85, "strategy": "earnings_call"}, ts, {"eligible": True}
+        )
+        obs_a = cohort_a.read_signal_observations(epoch_id="epoch-1")
+        assert len(obs_a) == 1
+        assert obs_a[0][0] == sig
+        assert obs_a[0][1] == {"eligible": True}
+        assert obs_a[0][2] == {"score": 0.85, "strategy": "earnings_call"}
+
+        # Separate fills & marks share marks table cleanly
+        intent_a = OrderIntent(
+            "intent-a", ("signal-1",), "horizon_30d_size_5k", "buy", 10,
+            datetime(2026, 7, 31, 21, tzinfo=UTC), session,
+            "next_session_open", "pending", None, None,
+        )
+        intent_b = OrderIntent(
+            "intent-b", ("signal-1",), "horizon_30d_size_10k", "buy", 10,
+            datetime(2026, 7, 31, 21, tzinfo=UTC), session,
+            "next_session_open", "pending", None, None,
+        )
+        cohort_a.stage_intent(intent_a)
+        cohort_b.stage_intent(intent_b)
+        cohort_a.apply_fill(
+            intent_a,
+            Fill("fill-a", "intent-a", "buy", session, ts, ts, Decimal("100"), Decimal("100.10"), 10, Decimal("1"), Decimal("0"), Decimal("0")),
+        )
+        cohort_b.apply_fill(
+            intent_b,
+            Fill("fill-b", "intent-b", "buy", session, ts, ts, Decimal("100"), Decimal("100.10"), 10, Decimal("1"), Decimal("0"), Decimal("0")),
+        )
+        bar = _bar("AAPL", session, Decimal("105.00"))
+        snap_a = cohort_a.mark(session, {"AAPL": bar}, "epoch-1", ts)
+        snap_b = cohort_b.mark(session, {"AAPL": bar}, "epoch-1", ts)
+        assert snap_a.net_equity == Decimal("5049.00")
+        assert snap_b.net_equity == Decimal("10049.00")
+        # Shared marks table has exactly 1 row for (AAPL, session)
+        assert cohort_a.connection.execute("SELECT COUNT(*) FROM marks").fetchone()[0] == 1
+        assert db.check_integrity() is True
+    finally:
+        cohort_a.close()
+        cohort_b.close()
+
+    # Read-only open requires explicit cohort_id on multi-cohort DB
+    with pytest.raises(ValueError, match="cohort_id is required"):
+        PortfolioLedger.open_existing(db)
+    ro_a = PortfolioLedger.open_existing(db, cohort_id="horizon_30d_size_5k")
+    ro_b = PortfolioLedger.open_existing(db, cohort_id="horizon_30d_size_10k")
+    try:
+        assert ro_a.opening_cash() == Decimal("5000.00")
+        assert ro_b.opening_cash() == Decimal("10000.00")
+    finally:
+        ro_a.close()
+        ro_b.close()
+
+
+def test_t_plus_1_open_trimming_allowed_for_next_open_entries_only(tmp_path):
+    ledger = PortfolioLedger(tmp_path / "gen.sqlite3", "horizon_30d_size_5k", Decimal("5000"))
+    session = date(2026, 8, 3)
+    ts = datetime(2026, 8, 3, 13, 30, tzinfo=UTC)
+    try:
+        ledger.record_signal(_signal())
+        entry = _intent(intent_id="entry-1")  # requested_qty=10, next_session_open, buy
+        ledger.stage_intent(entry)
+        trimmed_fill = Fill(
+            "fill-trimmed", "entry-1", "buy", session, ts, ts,
+            Decimal("100"), Decimal("100.10"), 7, Decimal("0.70"), Decimal("0"), Decimal("0"),
+        )
+        ledger.apply_fill(entry, trimmed_fill)
+        assert ledger.open_positions()[0]["quantity"] == 7
+
+        # Oversized entry still rejected
+        entry2 = _intent(intent_id="entry-2")
+        ledger.stage_intent(entry2)
+        with pytest.raises(ValueError, match="fill quantity does not match"):
+            ledger.apply_fill(
+                entry2,
+                Fill("fill-over", "entry-2", "buy", session, ts, ts, Decimal("100"), Decimal("100.10"), 11, Decimal("1.10"), Decimal("0"), Decimal("0")),
+            )
+
+        # Exit intent still requires exact quantity match
+        exit_intent = OrderIntent(
+            "exit-1", ("signal-1",), "horizon_30d_size_5k", "sell", 7,
+            datetime(2026, 8, 3, 21, tzinfo=UTC), date(2026, 8, 4),
+            "next_session_open", "pending", None, None,
+        )
+        ledger.stage_intent(exit_intent)
+        with pytest.raises(ValueError, match="fill quantity does not match"):
+            ledger.apply_fill(
+                exit_intent,
+                Fill("fill-exit-short", "exit-1", "sell", date(2026, 8, 4), ts, ts, Decimal("100"), Decimal("99.90"), 5, Decimal("0.50"), Decimal("0"), Decimal("0")),
+            )
+    finally:
+        ledger.close()
+
+
+def test_state_manager_regime_in_generation_db_and_zero_write_on_read(tmp_path):
+    from tradingagents.strategies.state.equity_snapshot import SNAPSHOT_FILENAME, load_snapshots
+    from tradingagents.strategies.state.state import StateManager
+
+    db = GenerationDB.for_state_dir(tmp_path)
+    ledger = PortfolioLedger(db, "horizon_30d_size_5k", Decimal("5000.00"))
+    session = date(2026, 8, 3)
+    ts = datetime(2026, 8, 3, 22, tzinfo=UTC)
+    try:
+        ledger.mark(session, {}, "epoch-1", ts)
+    finally:
+        ledger.close()
+
+    sm = StateManager(tmp_path, db=db, cohort_id="horizon_30d_size_5k")
+    sm.save_regime_snapshot(
+        {"regime": "calm", "vix_close": 14.5},
+        session=session,
+        epoch_id="epoch-1",
+        horizon="30d",
+        execution_valid=True,
+        staging_valid=True,
+    )
+    # Idempotent replay succeeds
+    sm.save_regime_snapshot(
+        {"regime": "calm", "vix_close": 14.5},
+        session=session,
+        epoch_id="epoch-1",
+        horizon="30d",
+        execution_valid=True,
+        staging_valid=True,
+    )
+    latest = sm.load_latest_regime()
+    assert latest is not None
+    assert latest["regime"] == "calm"
+    assert latest["session"] == "2026-08-03"
+    assert not (tmp_path / "regime_snapshots.json").exists()
+
+    # Strictly read-only loads produce zero JSON/JSONL files on disk
+    assert sm.load_paper_trades() == []
+    assert not (tmp_path / "paper_trades.json").exists()
+    snaps = load_snapshots(tmp_path, cohort_id="horizon_30d_size_5k", db=db)
+    assert len(snaps) == 1
+    assert snaps[0]["portfolio_value"] == 5000.0
+    assert not (tmp_path / SNAPSHOT_FILENAME).exists()

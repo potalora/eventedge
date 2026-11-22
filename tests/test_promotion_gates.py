@@ -20,13 +20,13 @@ def _passing() -> PromotionEvidence:
     return PromotionEvidence(
         clean_common_sessions=30,
         independent_completed_ideas=50,
-        strategy_claim_event_counts={"congressional_trades": 30},
+        strategy_claim_event_counts={"earnings_call": 30},
         missing_marks=0,
         stale_marks=0,
         sessions_aligned=True,
         stable_epoch_hashes=True,
         crosses_invalid_boundary=False,
-        classified_strategy_count=12,
+        classified_strategy_count=5,
         cost_categories_present=True,
         risk_limit_breach=False,
         matched_excess_return=0.01,
@@ -245,6 +245,19 @@ def test_cli_refuses_missing_evidence_before_manager_or_state_creation(
 
     assert exc.value.code == 2
     assert list(tmp_path.iterdir()) == []
+
+
+def test_promotion_policy_expected_strategy_count_is_configurable() -> None:
+    assert PromotionPolicy().expected_strategy_count == 5
+    # Mismatched count fails closed
+    wrong = PromotionEvaluator().evaluate(replace(_passing(), classified_strategy_count=4))
+    assert wrong.status is PromotionDecisionStatus.FAIL
+    assert wrong.reasons == ("unclassified_strategy_silence",)
+    # Explicit override is honored
+    custom = PromotionEvaluator(PromotionPolicy(expected_strategy_count=7)).evaluate(
+        replace(_passing(), classified_strategy_count=7)
+    )
+    assert custom.status is PromotionDecisionStatus.ELIGIBLE_FOR_MANUAL_REVIEW
 
 
 def test_promotion_module_does_not_import_directional_accuracy_or_learning() -> None:
