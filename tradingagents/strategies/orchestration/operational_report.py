@@ -1228,14 +1228,25 @@ def _validate_committee_content(connection, name, profile, report, document, acc
     ledger = PortfolioLedger.__new__(PortfolioLedger)
     ledger._connection, ledger.cohort_id = connection, name
     session = date.fromisoformat(report['session'])
-    expected_inputs = []
-    for record in ledger.read_signals(start_session=session, end_session=session,
-            epoch_id=report['epoch_id'], policy_id=profile.ledger_policy_id):
-        provenance = ledger.read_signal_policy_provenance(record.signal_id)
-        if provenance is None:
-            raise ValueError('committee signal lacks native admission provenance')
-        if provenance['order_eligible']:
-            expected_inputs.append(record.signal_id)
+    manifest_row = ledger._read_policy_envelope(
+        'policy_staging_audit_manifest',
+        f"{session.isoformat()}:{report['epoch_id']}:{profile.ledger_policy_id}",
+    )
+    if manifest_row is not None and 'input_signal_ids' in json.loads(manifest_row['payload_json']):
+        # Revalidate the exact completed native proof, never the committee's claims.
+        manifest = ledger._decode_staging_manifest_row(manifest_row)
+        expected_inputs = list(manifest['ingress_signal_ids'])
+    else:
+        # Historical manifests/callers have no exact membership proof. Retain the
+        # old fail-closed global-input check rather than silently repairing them.
+        expected_inputs = []
+        for record in ledger.read_signals(start_session=session, end_session=session,
+                epoch_id=report['epoch_id'], policy_id=profile.ledger_policy_id):
+            provenance = ledger.read_signal_policy_provenance(record.signal_id)
+            if provenance is None:
+                raise ValueError('committee signal lacks native admission provenance')
+            if provenance['order_eligible']:
+                expected_inputs.append(record.signal_id)
     if identities != sorted(expected_inputs):
         raise ValueError('committee omits native admitted inputs')
     signals = []

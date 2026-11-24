@@ -1867,6 +1867,7 @@ class MultiStrategyEngine:
                     policy_id=policy_id,
                     policy_version=policy_config.version,
                     bound_context_digest=str(policy_binding["context_digest"]),
+                    input_signal_ids=tuple(sorted(policy_provenance_specs)),
                     ingress_signal_ids=ingress_ids,
                     candidate_decision_ids=tuple(candidate_decision_ids),
                     committee_not_selected_ids=nonselected_ids,

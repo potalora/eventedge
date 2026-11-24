@@ -979,6 +979,39 @@ class PolicyAuditMixin:
     # 5. Policy staging audit manifests
     # ------------------------------------------------------------------
 
+    def _explicit_staging_ingress(
+        self,
+        session: date,
+        epoch_id: str,
+        policy_id: str,
+        input_signal_ids: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Prove exact cohort membership, including noneligible inputs."""
+        rows = self._connection.execute(
+            """SELECT signal_id FROM signals
+               WHERE reference_session = ? AND epoch_id = ? AND policy_id = ?
+               ORDER BY signal_id""",
+            (_encode(session), epoch_id, policy_id),
+        ).fetchall()
+        scoped_ids = {str(row["signal_id"]) for row in rows}
+        members = set(input_signal_ids)
+        if not members <= scoped_ids:
+            raise LedgerConflictError("policy staging input scope mismatch")
+        owned: set[str] = set()
+        ingress: list[str] = []
+        for signal_id in sorted(scoped_ids):
+            companion = self.read_signal_policy_provenance(signal_id)
+            if companion is None:
+                if signal_id in members:
+                    raise LedgerConflictError("missing staging signal policy provenance")
+                continue
+            owned.add(signal_id)
+            if companion["order_eligible"]:
+                ingress.append(signal_id)
+        if owned != members:
+            raise LedgerConflictError("policy staging input membership mismatch")
+        return tuple(ingress)
+
     def record_policy_staging_audit_manifest(
         self,
         session: date,
@@ -991,8 +1024,9 @@ class PolicyAuditMixin:
         candidate_decision_ids: tuple[str, ...],
         committee_not_selected_ids: tuple[str, ...],
         recorded_at: datetime,
+        input_signal_ids: tuple[str, ...] | None = None,
     ) -> dict[str, object]:
-        """Commit the exact, complete policy-decision partition for staging."""
+        """Commit the exact policy partition; new calls can prove cohort inputs."""
         session = _require_exact_date(session, "session")
         _require_timezone_aware(recorded_at, "recorded_at")
         epoch_id = str(epoch_id).strip()
@@ -1012,6 +1046,18 @@ class PolicyAuditMixin:
                 raise ValueError(f"{label} exceeds the staging audit bound")
             return normalized
 
+        if input_signal_ids is not None and (
+            isinstance(input_signal_ids, (str, bytes))
+            or any(
+                not isinstance(value, str) or not value or value != value.strip()
+                for value in input_signal_ids
+            )
+        ):
+            raise ValueError("input_signal_ids must contain exact nonempty string IDs")
+        inputs = (
+            None if input_signal_ids is None
+            else exact_ids(input_signal_ids, "input_signal_ids")
+        )
         ingress = exact_ids(ingress_signal_ids, "ingress_signal_ids")
         decision_ids = exact_ids(candidate_decision_ids, "candidate_decision_ids")
         nonselected = exact_ids(
@@ -1025,19 +1071,25 @@ class PolicyAuditMixin:
             or binding["context_digest"] != bound_context_digest
         ):
             raise LedgerConflictError("policy staging manifest binding mismatch")
-        signal_rows = self._connection.execute(
-            """SELECT signal_id FROM signals
-               WHERE reference_session = ? AND epoch_id = ? AND policy_id = ?
-               ORDER BY signal_id""",
-            (_encode(session), epoch_id, policy_id),
-        ).fetchall()
-        actual_ingress: list[str] = []
-        for srow in signal_rows:
-            companion = self.read_signal_policy_provenance(str(srow["signal_id"]))
-            if companion is None:
-                raise LedgerConflictError("missing staging signal policy provenance")
-            if companion["order_eligible"]:
-                actual_ingress.append(str(srow["signal_id"]))
+        if inputs is not None:
+            actual_ingress = self._explicit_staging_ingress(
+                session, epoch_id, policy_id, inputs
+            )
+        else:
+            # Preserve legacy semantics when no ownership proof exists.
+            signal_rows = self._connection.execute(
+                """SELECT signal_id FROM signals
+                   WHERE reference_session = ? AND epoch_id = ? AND policy_id = ?
+                   ORDER BY signal_id""",
+                (_encode(session), epoch_id, policy_id),
+            ).fetchall()
+            actual_ingress = []
+            for srow in signal_rows:
+                companion = self.read_signal_policy_provenance(str(srow["signal_id"]))
+                if companion is None:
+                    raise LedgerConflictError("missing staging signal policy provenance")
+                if companion["order_eligible"]:
+                    actual_ingress.append(str(srow["signal_id"]))
         if ingress != tuple(sorted(actual_ingress)):
             raise LedgerConflictError("policy staging ingress partition mismatch")
         decisions: list[dict[str, object]] = []
@@ -1075,6 +1127,8 @@ class PolicyAuditMixin:
             "candidate_decision_ids": list(decision_ids),
             "committee_not_selected_ids": list(nonselected),
         }
+        if inputs is not None:
+            payload["input_signal_ids"] = list(inputs)
         record_id = f"{session.isoformat()}:{epoch_id}:{policy_id}"
         row = self._write_policy_envelope(
             record_type=RECORD_STAGING_MANIFEST,
@@ -1117,6 +1171,12 @@ class PolicyAuditMixin:
     ) -> dict[str, object]:
         payload = self._verify_envelope_row(row, "policy staging audit manifest")
         try:
+            if "input_signal_ids" in payload and not isinstance(payload["input_signal_ids"], list):
+                raise TypeError("input_signal_ids must be an array")
+            inputs = (
+                tuple(payload["input_signal_ids"])  # type: ignore[arg-type]
+                if "input_signal_ids" in payload else None
+            )
             ingress = tuple(payload["ingress_signal_ids"])  # type: ignore[arg-type]
             decisions = tuple(payload["candidate_decision_ids"])  # type: ignore[arg-type]
             nonselected = tuple(payload["committee_not_selected_ids"])  # type: ignore[arg-type]
@@ -1143,7 +1203,8 @@ class PolicyAuditMixin:
             )
 
         if (
-            not canonical_ids(ingress)
+            (inputs is not None and (not canonical_ids(inputs) or len(inputs) > 4096))
+            or not canonical_ids(ingress)
             or not canonical_ids(decisions)
             or not canonical_ids(nonselected)
             or payload.get("cohort_id") != self.cohort_id
@@ -1163,23 +1224,28 @@ class PolicyAuditMixin:
             or binding["context_digest"] != bound_context_digest
         ):
             raise LedgerConflictError("policy staging audit binding mismatch")
-        signal_rows = self._connection.execute(
-            """SELECT signal_id FROM signals
-               WHERE reference_session = ? AND epoch_id = ? AND policy_id = ?
-               ORDER BY signal_id""",
-            (row["session"], row["epoch_id"], policy_id),
-        ).fetchall()
-        actual_ingress = tuple(
-            sorted(
-                str(item["signal_id"])
-                for item in signal_rows
-                if (
-                    (companion := self.read_signal_policy_provenance(str(item["signal_id"])))
-                    is not None
-                    and companion["order_eligible"]
+        if inputs is not None:
+            actual_ingress = self._explicit_staging_ingress(
+                session_date, str(row["epoch_id"]), policy_id, inputs
+            )
+        else:
+            signal_rows = self._connection.execute(
+                """SELECT signal_id FROM signals
+                   WHERE reference_session = ? AND epoch_id = ? AND policy_id = ?
+                   ORDER BY signal_id""",
+                (row["session"], row["epoch_id"], policy_id),
+            ).fetchall()
+            actual_ingress = tuple(
+                sorted(
+                    str(item["signal_id"])
+                    for item in signal_rows
+                    if (
+                        (companion := self.read_signal_policy_provenance(str(item["signal_id"])))
+                        is not None
+                        and companion["order_eligible"]
+                    )
                 )
             )
-        )
         if actual_ingress != ingress:
             raise LedgerConflictError("policy staging audit ingress mismatch")
         scoped_rows = self._connection.execute(
@@ -1231,6 +1297,7 @@ class PolicyAuditMixin:
         return {
             "manifest_id": manifest_id,
             **payload,
+            **({"input_signal_ids": inputs} if inputs is not None else {}),
             "session": session_date,
             "ingress_signal_ids": ingress,
             "candidate_decision_ids": decisions,
