@@ -18,6 +18,7 @@ from tradingagents.strategies.metrics.store import MetricStore
 from tradingagents.strategies.orchestration.daily_pipeline import (
     aggregate_candidate_input_issues, canonical_candidate_input_issue_summaries,
 )
+from tradingagents.strategies.orchestration.candidate_inputs import isolated_insufficient_history
 from tradingagents.strategies.orchestration.run_outcome import (
     DAILY_RESULT_ENVELOPE_KEYS, DAILY_RESULT_PREFIX, DAILY_RESULT_WIRE_VERSION,
 )
@@ -426,6 +427,35 @@ def _book(state: Path, name: str, generation: str, session: str, epoch: str | No
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, InvalidOperation):
         diagnose('ledger_unreadable', name)
     return result
+
+
+def _candidate_acceptance(state: Path, name: str, reference: dict, diagnose, *, allow_legacy_report: bool = False,
+                          reported_uncontained: bool = False) -> bool:
+    from .candidate_inputs import containment_key, reference_health_recorded, validate_candidate_acceptance
+    try:
+        with _database(_metrics_db_path(state)) as connection:
+            row = connection.execute(
+                'SELECT issue_id,epoch_id,session,dependency_kind,ticker,payload_json FROM candidate_input_issues WHERE issue_id=?',
+                (reference['issue_id'],)).fetchone()
+            if row is None:
+                raise ValueError('candidate issue missing')
+            issue = MetricStore._candidate_input_issue(tuple(row))
+            if canonical_candidate_input_issue_summaries([issue.reference()], reference['session']) != canonical_candidate_input_issue_summaries([reference], reference['session']):
+                raise ValueError('candidate issue reference conflict')
+        path, _ = _cohort_db_path(state, name)
+        with _database(path) as connection:
+            if (reported_uncontained and issue.dependency_kind == 'reference_bar'
+                    and not reference_health_recorded(connection, issue)
+                    and connection.execute('SELECT 1 FROM schema_metadata WHERE metadata_key=?',
+                                           (containment_key(issue, name),)).fetchone() is None):
+                # A recorded but uncontained failure is degraded evidence,
+                # not a missing acceptance that the worker claimed existed.
+                return False
+            validate_candidate_acceptance(connection, issue, name, allow_legacy_report=allow_legacy_report)
+        return True
+    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
+        diagnose('candidate_containment_acceptance_invalid', name)
+        return False
 
 
 def _candidate_issues(state: Path, epoch: str | None, session: str, diagnose) -> list[dict]:
@@ -862,8 +892,23 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['accounting_valid'] = all(row['accounting_valid'] for row in report['cohorts'].values())
         report['staging_complete'] = all(row['staging_complete'] for row in report['cohorts'].values())
         report['candidate_input_issues'] = _candidate_issues(state,epoch,session,diagnose)
-        for row in report['cohorts'].values():
-            row['staging_valid'] = row['staging_complete'] and not report['candidate_input_issues']
+        daily_wire = latest.get('wire') if latest else None
+        legacy_candidate_wire = (
+            isinstance(daily_wire, dict) and set(daily_wire) == set(EXPECTED_COHORTS)
+            and all(isinstance(item, dict) and 'candidate_input_acceptance' not in item
+                    for item in daily_wire.values())
+        )
+        for name, row in report['cohorts'].items():
+            wire_row = daily_wire.get(name, {}) if isinstance(daily_wire, dict) else {}
+            row['staging_valid'] = row['staging_complete'] and (
+                not report['candidate_input_issues'] or (
+                    isolated_insufficient_history(report['candidate_input_issues'])
+                    and all(_candidate_acceptance(
+                                state, name, issue, diagnose, allow_legacy_report=legacy_candidate_wire,
+                                reported_uncontained=(wire_row.get('staging_valid') is False
+                                                      and 'candidate_input_acceptance' not in wire_row))
+                            and issue['ticker'] not in row['staging_volatility']
+                            for issue in report['candidate_input_issues'])))
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())
         report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose,disabled,
             strategies={strategy.name for strategy in report_strategies})
@@ -975,7 +1020,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                 diagnose('wire_coverage_invalid')
         report['evidence_complete'] = not diagnostics
         if recovery is not None and report['evidence_complete'] and report['accounting_valid'] and report['staging_complete']:
-            report['outcome'] = ('clean' if report['input_coverage_valid'] and report['staging_valid'] else 'degraded')
+            report['outcome'] = ('clean' if report['input_coverage_valid'] and report['staging_valid']
+                                 and not report['candidate_input_issues'] else 'degraded')
         elif latest and latest['outcome']=='failed':
             report['outcome']='failed'
         elif report['evidence_complete'] and report['accounting_valid'] and latest:

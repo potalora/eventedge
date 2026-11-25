@@ -12,8 +12,25 @@ from tradingagents.strategies.orchestration.operational_report import build_oper
 from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrchestrator, build_default_cohorts
 
 
-def build_recovered(pipeline, monkeypatch, *, original='failed', include_preflight=False):
+def build_recovered(pipeline, monkeypatch, *, original='failed', include_preflight=False, short_history=False):
     fixture, unused_owner, config, repo = prospective(pipeline, monkeypatch)
+    if short_history:
+        engine_class = type(unused_owner.cohorts[0]['engine'])
+        original_fetch = engine_class._fetch_all_data
+        def short_fetch(self, *args, **kwargs):
+            result = original_fetch(self, *args, **kwargs)
+            if 'NVDA' in self._price_cache:
+                self._price_cache['NVDA'] = self._price_cache['NVDA'].tail(12)
+            return result
+        monkeypatch.setattr(engine_class, '_fetch_all_data', short_fetch)
+        service_class = type(unused_owner.cohorts[0]['engine'].data_acquisition)
+        original_missing = service_class.fetch_missing_prices
+        def short_missing(self, *args, **kwargs):
+            result = original_missing(self, *args, **kwargs)
+            if 'NVDA' in result:
+                result['NVDA'] = self.price_cache['NVDA'] = result['NVDA'].tail(12)
+            return result
+        monkeypatch.setattr(service_class, 'fetch_missing_prices', short_missing)
     from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
     complete = PortfolioLedger.complete_staging
     last_name = unused_owner.cohorts[-1]['config'].name
@@ -86,6 +103,70 @@ def test_real_recovery_report_uses_distinct_proof_and_preserves_original_attempt
     assert (repo / 'data/generations/manifest.json').read_bytes() == manifest
     assert {item.name: item.read_bytes() for item in (repo / 'data/logs/run_attempts').glob('*.json')} == attempts
     assert not fixture.blocked_calls
+
+
+@pytest.mark.parametrize('proof', ['absent', 'valid', 'deleted', 'mutated'])
+def test_completed_reference_quarantine_recovery_requires_durable_proof(pipeline, monkeypatch, proof):
+    from dataclasses import replace
+
+    fixture, owner, _, _ = prospective(pipeline, monkeypatch)
+    fixture.fault = 'sip_unsupported'
+    if proof != 'absent':
+        source = owner._price_source
+        resolve = source.resolve_candidate_daily_bars
+
+        def typed_failure(*args, **kwargs):
+            result = resolve(*args, **kwargs)
+            return replace(result, local_failures={'NVDA': 'missing_data'})
+
+        monkeypatch.setattr(source, 'resolve_candidate_daily_bars', typed_failure)
+    wire = owner.run_daily(SESSION.isoformat())
+    assert len(wire) == 16 and all(not row['error'] for row in wire.values())
+    assert all(row['staging_valid'] is (proof != 'absent') for row in wire.values())
+    assert all(row['candidate_bar_quarantines'] == ['NVDA'] for row in wire.values())
+    assert all(cohort['ledger'].staging_completed(
+        SESSION, owner._epoch_id, owner._policy_id_for_horizon(cohort['config'].horizon)
+    ) for cohort in owner.cohorts)
+    calls, models = fixture.calls.copy(), fixture.model_calls.copy()
+    fixture.block_all = True
+    conn = owner.cohorts[0]['ledger']._connection
+    if proof == 'deleted':
+        assert conn.execute("DELETE FROM schema_metadata WHERE metadata_key LIKE 'candidate_reference_health:v1:%'").rowcount == 1
+        conn.commit()
+    elif proof == 'mutated':
+        assert conn.execute("UPDATE schema_metadata SET metadata_value='{}' WHERE metadata_key LIKE 'candidate_reference_health:v1:%'").rowcount == 1
+        conn.commit()
+    expected = (('recovered', 'complete') if proof == 'valid' else ('requires_user', 'checkpoint_invalid'))
+    assert recovery.recover_owner(owner, SESSION, now=fixture.now) == recovery._result(*expected)
+    assert fixture.calls == calls and fixture.model_calls == models and not fixture.blocked_calls
+
+
+def test_short_history_skip_recovers_with_unchanged_completion_gate(pipeline, monkeypatch):
+    fixture, config, repo, state, path, manifest, attempts = build_recovered(
+        pipeline, monkeypatch, short_history=True)
+    report = build_operational_report(repo, GENERATION, str(SESSION), snapshot_guaranteed=True)
+    assert report['evidence_complete'], report['diagnostics']
+    assert report['staging_valid'] and report['accounting_valid']
+    assert report['outcome'] == 'degraded'
+    assert report['recovery']['books_count'] == 16
+    assert [(row['ticker'], row['reason_code']) for row in report['candidate_input_issues']] == [
+        ('NVDA', 'insufficient_history')]
+    assert not fixture.blocked_calls
+
+    from scripts.recover_runtime import _terminal_report
+    from tradingagents.strategies.orchestration.operating_contract import (
+        OperatingProfile, POLICY, evaluate_completion,
+    )
+    from tradingagents.strategies.orchestration.operational_report import EXPECTED_COHORTS
+
+    # Attach the supported completion projection to the real recovered report.
+    profile = OperatingProfile(version=POLICY, roster=tuple(sorted(EXPECTED_COHORTS)),
+        profile_sha256=hashlib.sha256((state / 'generation-config.json').read_bytes()).hexdigest(),
+        horizon_policies={}, strategies=(), supported_strategies=(), declared_exclusions={},
+        exclusion_scope_sha256='', config=config, ledger_policy_id='')
+    report['completion'] = evaluate_completion(profile, {'report': report})
+    assert report['completion']['reason_codes'] == []
+    assert _terminal_report(report) == recovery._result('recovered', 'complete')
 
 
 @pytest.mark.parametrize('damage', ['receipt', 'source', 'committee', 'profile', 'cash'])

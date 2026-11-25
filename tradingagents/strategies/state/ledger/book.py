@@ -752,6 +752,26 @@ class LedgerBookMixin:
         ).fetchall()
         return [self._signal_from_row(row) for row in rows]
 
+    def read_policy_staging_signals(
+        self, session: date, epoch_id: str, policy_id: str
+    ) -> list[SignalRecord]:
+        """Read the validated exact inputs of one cohort's accepted staging.
+
+        Historical manifests without explicit membership retain the generation-
+        wide projection; do not infer newer proof from today's companions.
+        """
+        matching = [
+            manifest
+            for manifest in self.read_policy_staging_audit_manifests(epoch_id=epoch_id)
+            if manifest["session"] == session and manifest["policy_id"] == policy_id
+        ]
+        if len(matching) != 1:
+            raise LedgerConflictError("missing policy staging audit manifest on replay")
+        manifest = matching[0]
+        if "input_signal_ids" in manifest:
+            return list(self.signals_by_ids(manifest["input_signal_ids"]))
+        return self.read_signals(session, session, epoch_id=epoch_id, policy_id=policy_id)
+
     def signals_by_ids(self, signal_ids: tuple[str, ...]) -> tuple[SignalRecord, ...]:
         if not signal_ids:
             return ()

@@ -59,12 +59,14 @@ def test_native_volume_interrupted_then_completed_replay_has_all_evidence(pipeli
     def resolution(tickers, session, now, max_age):
         synthetic = {ticker for ticker in tickers if ticker.startswith("ZZ")}
         actual = native_resolution([t for t in tickers if t not in synthetic], session, now, max_age)
+        source = next(iter(actual.bars.values())).source
         attempts = tuple(CandidateBarAttempt(ticker=ticker, session=session,
-            attempt=1, source="offline-volume", fetched_at=now,
+            attempt=1, source=source, fetched_at=now,
             open=None, high=None, low=None, close=None,
             validation_error="missing offline reference") for ticker in sorted(synthetic))
         return CandidateBarResolution(actual.bars, actual.attempts + attempts,
-            actual.recovered_tickers, actual.quarantined_tickers | frozenset(synthetic))
+            actual.recovered_tickers, actual.quarantined_tickers | frozenset(synthetic),
+            local_failures={**(actual.local_failures or {}), **dict.fromkeys(synthetic, "missing_data")})
     monkeypatch.setattr(owner._price_source, "resolve_candidate_daily_bars", resolution)
     native_stage = daily_pipeline.stage_daily_results
     def interrupt(state):

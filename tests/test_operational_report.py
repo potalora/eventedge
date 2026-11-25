@@ -277,7 +277,7 @@ def test_missing_book_withholds_performance_and_report_still_written(native_evid
     assert json.loads(paths['json'].read_text())==report
 
 
-@pytest.mark.parametrize('damage',[None,'missing','metadata','wire_scope','summary'])
+@pytest.mark.parametrize('damage',[None,'missing','metadata','wire_scope','summary','wire_staging'])
 def test_completed_staging_with_candidate_quarantine_reconciles_durable_issues(native_evidence,damage):
     from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
     repo,state,wire=native_evidence
@@ -293,8 +293,25 @@ def test_completed_staging_with_candidate_quarantine_reconciles_durable_issues(n
             _insert(connection,'candidate_input_issues',issue_id=issue.issue_id,epoch_id=EPOCH,
                 session=SESSION,dependency_kind=issue.dependency_kind,ticker='BAD' if damage=='metadata' else issue.ticker,
                 payload_json=issue.canonical_payload())
-    for row in wire.values():
-        row.update(degraded=True,staging_valid=False,candidate_input_issues=[ref])
+    from decimal import Decimal
+    from tradingagents.strategies.execution.models import MarketBar
+    from tradingagents.strategies.orchestration.candidate_inputs import (
+        candidate_acceptance_payload, containment_key, save_reference_health,
+    )
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
+        peer = MarketBar('SPY', issue.session, Decimal(100), Decimal(101), Decimal(99),
+                         Decimal(100), issue.source, issue.fetched_at, False)
+        save_reference_health(connection, issue, issue.reason_code, peer)
+        connection.execute("UPDATE staging_runs SET post_state_digest=?", ('a'*64,))
+        for name in COHORTS:
+            proof = candidate_acceptance_payload(connection, issue, name)
+            _insert(connection, 'schema_metadata', metadata_key=containment_key(issue, name), metadata_value=proof)
+    for name, row in wire.items():
+        with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
+            proof = candidate_acceptance_payload(connection, issue, name)
+        row.update(degraded=True,staging_valid=damage!='wire_staging',
+                   candidate_bar_quarantines=['NVDA'],candidate_input_issues=[ref],
+                   candidate_input_acceptance=json.loads(proof))
     if damage=='wire_scope':
         wire[COHORTS[0]].pop('candidate_input_issues')
         # Keep this negative case structurally valid; omit every wire reference.
@@ -305,7 +322,9 @@ def test_completed_staging_with_candidate_quarantine_reconciles_durable_issues(n
     report=_report(repo)
     assert report['staging_complete'] is True
     assert report['accounting_valid'] is True
-    assert report['staging_valid'] is False
+    # Staging and evidence integrity remain separate: malformed receipts must
+    # fail completion even when all 16 completed staging rows remain present.
+    assert report['staging_valid'] is (damage != 'wire_staging')
     if damage is None:
         assert report['evidence_complete'] is True, report['diagnostics']
         assert report['outcome']=='degraded'
@@ -314,6 +333,46 @@ def test_completed_staging_with_candidate_quarantine_reconciles_durable_issues(n
     else:
         assert report['evidence_complete'] is False
         assert report['performance_claims_withheld'] is True
+
+
+@pytest.mark.parametrize('damage', [None, 'missing', 'stale', 'cash'])
+def test_isolated_short_history_report_retains_valid_staging(native_evidence, damage):
+    from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
+    repo, state, wire = native_evidence
+    issue = CandidateInputIssue.create(issue_id='candidate_input_issue_'+'d'*32,
+        epoch_id=EPOCH, session=date.fromisoformat(SESSION), dependency_kind='volatility_history',
+        reason_code='insufficient_history', ticker='UI', source='shared_price_history',
+        fetched_at=datetime(2026,10,6,20,tzinfo=timezone.utc),
+        requested_history_digest='sha256:'+'a'*64, returned_history_digest='sha256:'+'b'*64,
+        expected_sessions=(date(2026,10,2), date(2026,10,5)),
+        observed_sessions=(date(2026,10,5),), retryable=False,
+        affected_signal_identities=({'event_key':'ui-event','strategy':'earnings_call'},), affected_cohorts=COHORTS)
+    ref = dict(issue.reference()); ref['affected_cohorts'] = list(issue.affected_cohorts)
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
+        if damage != 'missing':
+            payload = json.loads(issue.canonical_payload())
+            if damage == 'stale':
+                payload['observed_sessions'] = ['2026-10-02']
+            _insert(connection, 'candidate_input_issues', issue_id=issue.issue_id, epoch_id=EPOCH,
+                session=SESSION, dependency_kind=issue.dependency_kind, ticker=issue.ticker,
+                payload_json=json.dumps(payload, sort_keys=True, separators=(',', ':')))
+        if damage == 'cash':
+            connection.execute("UPDATE account_snapshots SET valid=0, invalid_reason='accounting failure'")
+    path = next((state/'source_inputs/staging_volatility').glob('*.json'))
+    envelope = SourceInputStore.decode(path.read_text())
+    envelope['payload']['quarantined_tickers'] = ('UI',)
+    envelope['digest'] = hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
+    path.write_text(SourceInputStore.encode(envelope))
+    for row in wire.values():
+        row.update(degraded=True, staging_valid=True, candidate_input_issues=[ref])
+    _attempt(repo, wire, outcome='degraded')
+    report = _report(repo)
+    if damage is None:
+        assert report['evidence_complete'], report['diagnostics']
+        assert report['staging_valid'] and report['accounting_valid']
+        assert report['outcome'] == 'degraded' and report['candidate_input_issues'] == [ref]
+    else:
+        assert not report['evidence_complete'] and report['performance_claims_withheld']
 
 
 @pytest.mark.parametrize('damage',['bundle','epoch','attempt_commit','misleading_wire'])

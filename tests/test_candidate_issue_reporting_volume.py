@@ -86,6 +86,25 @@ def test_incident_volume_round_trips_through_worker_and_manager(
     assert canonical_candidate_input_issue_summaries(references, SESSION) == references
 
 
+@pytest.mark.parametrize('reason', ['missing_data', 'stale_data', 'invalid_data', 'provider_error'])
+def test_isolated_reference_failure_requires_acceptance_despite_exact_quarantine(reason):
+    ref = reference(0, COHORTS)
+    ref.update(dependency_kind='reference_bar', reason_code=reason)
+    results = carriers([ref])
+    for row in results.values():
+        row['staging_valid'] = True
+        row['candidate_bar_quarantines'] = [ref['ticker']]
+    assert not _valid_daily_cohort_results(results, SESSION)
+    if reason == 'provider_error':
+        with pytest.raises(ValueError):
+            aggregate_candidate_input_issues(results, SESSION)
+        return
+    assert aggregate_candidate_input_issues(results, SESSION) == [ref]
+    results[COHORTS[0]]['candidate_bar_quarantines'] = ['OTHER']
+    with pytest.raises(ValueError):
+        aggregate_candidate_input_issues(results, SESSION)
+
+
 def test_full_unique_budget_can_be_shared_by_all_portfolios():
     references = [reference(i, COHORTS) for i in range(256)]
     assert aggregate_candidate_input_issues(carriers(references), SESSION) == references
@@ -104,3 +123,35 @@ def test_each_portfolio_reference_list_remains_bounded():
     results[COHORTS[0]]["candidate_input_issues"] = [ref] * 257
     with pytest.raises(ValueError, match="reference collection is invalid"):
         aggregate_candidate_input_issues(results, SESSION)
+
+
+@pytest.mark.parametrize('damage', [None, 'multiple', 'coexisting', 'reference', 'error', 'execution', 'quarantine', 'scope'])
+def test_only_isolated_short_history_can_carry_valid_staging(damage):
+    ref = reference(0, COHORTS)
+    ref['reason_code'] = 'insufficient_history'
+    refs = [ref]
+    if damage in {'multiple', 'coexisting'}:
+        extra = reference(1, COHORTS)
+        if damage == 'multiple':
+            extra['reason_code'] = 'insufficient_history'
+        refs.append(extra)
+    if damage == 'reference':
+        ref['dependency_kind'] = 'reference_bar'
+    results = carriers(refs)
+    for row in results.values():
+        row['staging_valid'] = True
+    first = results[COHORTS[0]]
+    if damage == 'error':
+        first['error'] = True
+    elif damage == 'execution':
+        first['execution_valid'] = False
+    elif damage == 'quarantine':
+        first['candidate_bar_quarantines'] = ['OTHER']
+    elif damage == 'scope':
+        first['candidate_input_issues'][0]['affected_cohorts'] = COHORTS[:-1]
+    if damage is None:
+        assert aggregate_candidate_input_issues(results, SESSION) == refs
+        assert _valid_daily_cohort_results(results, SESSION)
+    else:
+        with pytest.raises(ValueError):
+            aggregate_candidate_input_issues(results, SESSION)

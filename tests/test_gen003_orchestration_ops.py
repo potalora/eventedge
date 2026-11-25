@@ -478,6 +478,7 @@ def test_one_committee_call_per_horizon_across_size_tiers(monkeypatch):
         },
         shared_data={},
         source_digest="d" * 64,
+        candidate_issue_references=[],
         candidate_bar_quarantines=[],
         volatility_quarantines=[],
         governed_reference_bars={},

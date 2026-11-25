@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 from tradingagents.strategies.execution.contracts import POLICY_DOCUMENT_VERSION
 from tradingagents.strategies.execution.models import AccountSnapshot, MarketBar
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -127,6 +128,7 @@ def _run_staging_matrix(
     fetch_error: Exception | None = None,
     mutate_before_fetch_error: bool = False,
     fail_stage_once_name: str | None = None,
+    price_source=None,
 ):
     config = deepcopy(DEFAULT_CONFIG)
     config["autoresearch"]["state_dir"] = str(tmp_path)
@@ -136,7 +138,7 @@ def _run_staging_matrix(
         config,
         generation_id="gen-volatility-fixture",
         generation_commit="fixture-commit",
-        price_source=object(),
+        price_source=price_source if price_source is not None else object(),
     )
     if fail_stage_once_name == "__first__":
         fail_stage_once_name = orchestrator.cohorts[0]["config"].name
@@ -150,7 +152,7 @@ def _run_staging_matrix(
     monkeypatch.setattr(first_engine, "_fetch_all_data", fetch_shared_data)
     missing_fetch_calls: list[tuple[tuple[str, ...], str, str]] = []
 
-    def fetch_missing_prices(tickers: list[str], start: str, end: str) -> None:
+    def fetch_missing_prices(tickers: list[str], start: str, end: str, *, strict=False) -> None:
         missing_fetch_calls.append((tuple(tickers), start, end))
         if fetch_error is not None and not mutate_before_fetch_error:
             raise fetch_error
@@ -162,6 +164,7 @@ def _run_staging_matrix(
             raise fetch_error
 
     monkeypatch.setattr(first_engine, "_fetch_missing_prices", fetch_missing_prices)
+    monkeypatch.setattr(first_engine.data_acquisition, "fetch_missing_prices", fetch_missing_prices)
     signals = [
         {
             "ticker": ticker,
@@ -472,6 +475,107 @@ def test_invalid_cached_session_sequence_is_refetched_once_for_all_cohorts(
             cohort["ledger"].close()
 
 
+@pytest.mark.parametrize("history_length", (1, 12, 60))
+def test_isolated_short_history_candidate_is_skipped_in_all_books_without_invalidating_staging(
+    tmp_path, monkeypatch, history_length
+) -> None:
+    short = _history(0.031).tail(history_length)
+    staged = {}
+    orchestrator, results, calls = _run_staging_matrix(
+        tmp_path, monkeypatch,
+        {"OPEN": _history(0.021), "PENDING": _history(0.027),
+         "NCL": _history(0.033), "UI": short},
+        signal_tickers=("NCL", "UI"), stage_observations=staged,
+    )
+    try:
+        assert [call[0] for call in calls] == [("UI",)]
+        issues = orchestrator._metric_store.read_candidate_input_issues(
+            orchestrator._epoch_id, SESSION
+        )
+        assert [(issue.ticker, issue.reason_code) for issue in issues] == [
+            ("UI", "insufficient_history")
+        ]
+        assert issues[0].observed_sessions == tuple(day.date() for day in short.index)
+        assert len(results) == len(staged) == 16
+        assert all(not row["error"] and row["execution_valid"] and row["staging_valid"]
+                   and row["degraded"] and row["candidate_input_issues"] == [issues[0].reference()]
+                   for row in results.values())
+        assert all(row == {"signals": ("NCL",), "reference_bars": ("NCL",)}
+                   for row in staged.values())
+        assert orchestrator.cohorts[0]["state"].load_latest_regime()["staging_valid"]
+        for cohort in orchestrator.cohorts:
+            ledger = cohort["ledger"]
+            binding = ledger.read_policy_session_context(SESSION)
+            assert set(binding["context"]["annualized_volatility"]) == {"OPEN", "PENDING", "NCL"}
+            assert not any(row["ticker"] == "UI" for row in ledger.read_policy_candidate_decisions(
+                SESSION, SESSION, epoch_id=orchestrator._epoch_id))
+            assert not any(signal.ticker == "UI" for signal in ledger.read_signals(
+                SESSION, SESSION, epoch_id=orchestrator._epoch_id))
+            assert ledger._connection.execute(
+                "SELECT COUNT(*) FROM marks WHERE ticker = 'UI'"
+            ).fetchone()[0] == 0
+            assert ledger._connection.execute(
+                "SELECT COUNT(*) FROM order_intents i JOIN intent_signals link "
+                "ON link.intent_id=i.intent_id JOIN signals s ON s.signal_id=link.signal_id "
+                "WHERE s.ticker='UI'"
+            ).fetchone()[0] == 0
+            assert ledger._connection.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 0
+        # Equal replay uses the durable skip, not a newly sufficient provider cache.
+        orchestrator.cohorts[0]["engine"]._price_cache["UI"] = _history(0.031)
+        before = list(calls)
+        replay = orchestrator.run_daily(SESSION.isoformat())
+        assert calls == before
+        assert all(not row["error"] and row["staging_valid"]
+                   and row["candidate_input_issues"] == [issues[0].reference()]
+                   for row in replay.values())
+    finally:
+        for cohort in orchestrator.cohorts:
+            cohort["ledger"].close()
+
+
+@pytest.mark.parametrize('kind', ['empty', 'stale', 'gap', 'duplicate', 'out_of_order', 'zero', 'nan', 'future'])
+def test_short_history_exception_rejects_invalid_suffix(kind):
+    from tradingagents.strategies.orchestration.daily_pipeline import _candidate_volatility_history_evidence
+    short = _history(.031).tail(12).copy()
+    if kind == 'empty':
+        short = short.iloc[:0]
+    elif kind == 'stale':
+        short = short.iloc[:-1]
+    elif kind == 'gap':
+        short = short.drop(short.index[5])
+    elif kind in {'zero', 'nan'}:
+        short.iloc[5, 0] = 0 if kind == 'zero' else float('nan')
+    else:
+        index = list(short.index)
+        if kind == 'duplicate':
+            index[5] = index[4]
+        elif kind == 'out_of_order':
+            index[4], index[5] = index[5], index[4]
+        elif kind == 'future':
+            index[-1] = pd.Timestamp(SESSION)
+        short.index = pd.DatetimeIndex(index)
+    reason, _, _ = _candidate_volatility_history_evidence(
+        {'UI': short}, 'UI', _xnys_sessions(previous_session(SESSION), 61))
+    assert reason != 'insufficient_history'
+
+
+@pytest.mark.parametrize('other_short', [True, False])
+def test_short_history_with_another_issue_is_not_isolated(tmp_path, monkeypatch, other_short):
+    orchestrator, results, calls = _run_staging_matrix(tmp_path, monkeypatch,
+        {'OPEN': _history(.021), 'PENDING': _history(.027), 'NCL': _history(.033),
+         'UI': _history(.031).tail(12),
+         'ZKH': _history(.031).tail(12) if other_short else _history(.031).iloc[:0]},
+        signal_tickers=('NCL', 'UI', 'ZKH'))
+    try:
+        issues = orchestrator._metric_store.read_candidate_input_issues(orchestrator._epoch_id, SESSION)
+        assert len(issues) == 2 and issues[0].reason_code == 'insufficient_history'
+        assert all(not row['error'] and not row['staging_valid'] for row in results.values())
+        assert not orchestrator.cohorts[0]['state'].load_latest_regime()['staging_valid']
+    finally:
+        for cohort in orchestrator.cohorts:
+            cohort['ledger'].close()
+
+
 def test_candidate_only_invalid_volatility_is_persisted_filtered_and_not_fabricated(
     tmp_path, monkeypatch
 ) -> None:
@@ -587,8 +691,9 @@ def test_candidate_only_invalid_volatility_is_persisted_filtered_and_not_fabrica
 
 
 @pytest.mark.parametrize("governed_kind", ("open", "pending", "p0"))
+@pytest.mark.parametrize("short_history", (False, True))
 def test_candidate_governed_overlap_with_invalid_volatility_remains_strict(
-    tmp_path, monkeypatch, governed_kind
+    tmp_path, monkeypatch, governed_kind, short_history
 ) -> None:
     open_tickers = ("UI",) if governed_kind == "open" else ("OPEN",)
     pending_tickers = ("UI",) if governed_kind == "pending" else ("PENDING",)
@@ -596,7 +701,7 @@ def test_candidate_governed_overlap_with_invalid_volatility_remains_strict(
     histories = {
         "OPEN": _history(0.021),
         "PENDING": _history(0.027),
-        "UI": pd.DataFrame({"Close": []}, index=pd.DatetimeIndex([])),
+        "UI": _history(.031).tail(12) if short_history else pd.DataFrame({"Close": []}, index=pd.DatetimeIndex([])),
     }
     orchestrator, results, missing_fetch_calls = _run_staging_matrix(
         tmp_path,
@@ -640,7 +745,8 @@ def test_candidate_volatility_provider_exception_is_sanitized_into_issue(
         monkeypatch,
         histories,
         signal_tickers=("UI",),
-        fetch_error=RuntimeError(secret),
+        fetch_error=SourceFetchError(secret, reason_code="invalid_response",
+                                     failed_operations={"UI": "invalid_response"}),
     )
 
     try:
@@ -675,7 +781,8 @@ def test_candidate_provider_error_quarantines_even_after_valid_cache_mutation(
         refetch_histories={"UI": _history(0.031)},
         signal_tickers=("UI",),
         stage_observations=staged,
-        fetch_error=RuntimeError(secret),
+        fetch_error=SourceFetchError(secret, reason_code="invalid_response",
+                                     failed_operations={"UI": "invalid_response"}),
         mutate_before_fetch_error=True,
     )
 
@@ -694,7 +801,7 @@ def test_candidate_provider_error_quarantines_even_after_valid_cache_mutation(
         assert all(
             result["error"] is False
             and result["degraded"] is True
-            and result["staging_valid"] is False
+            and result["staging_valid"] is True
             and result["candidate_input_issues"] == [issues[0].reference()]
             for result in results.values()
         )
@@ -805,8 +912,8 @@ def test_equal_volatility_issue_replay_filters_without_candidate_refetch(
             raise AssertionError("candidate volatility refetched during equal replay")
 
         monkeypatch.setattr(
-            orchestrator.cohorts[0]["engine"],
-            "_fetch_missing_prices",
+            orchestrator.cohorts[0]["engine"].data_acquisition,
+            "fetch_missing_prices",
             unexpected_refetch,
         )
         replay = orchestrator.run_daily(SESSION.isoformat())
@@ -903,7 +1010,7 @@ def test_candidate_volatility_retry_recovers_one_ticker_and_isolates_another(
         )
         assert all(
             result["error"] is False
-            and result["staging_valid"] is False
+            and result["staging_valid"] is True
             and result["candidate_input_issues"] == [issues[0].reference()]
             for result in results.values()
         )
@@ -1035,8 +1142,8 @@ def test_volatility_issue_tamper_fails_closed_without_candidate_refetch(
             raise AssertionError("candidate volatility refetched after issue tamper")
 
         monkeypatch.setattr(
-            orchestrator.cohorts[0]["engine"],
-            "_fetch_missing_prices",
+            orchestrator.cohorts[0]["engine"].data_acquisition,
+            "fetch_missing_prices",
             unexpected_refetch,
         )
         replay = orchestrator.run_daily(SESSION.isoformat())
@@ -1201,8 +1308,8 @@ def test_stored_candidate_volatility_issue_becoming_governed_fails_before_fetch(
             raise AssertionError("scope conflict performed volatility provider I/O")
 
         monkeypatch.setattr(
-            orchestrator.cohorts[0]["engine"],
-            "_fetch_missing_prices",
+            orchestrator.cohorts[0]["engine"].data_acquisition,
+            "fetch_missing_prices",
             unexpected_refetch,
         )
         replay = orchestrator.run_daily(SESSION.isoformat())

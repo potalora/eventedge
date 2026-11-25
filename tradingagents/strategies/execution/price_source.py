@@ -95,6 +95,8 @@ class CandidateBarResolution:
     recovered_tickers: frozenset[str]
     quarantined_tickers: frozenset[str]
     eligibility_evidence: Mapping[str, dict] | None = None
+    # Positive provider-bound classification; diagnostic strings are not proof.
+    local_failures: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -688,12 +690,9 @@ class AlpacaSIPPriceSource:
             if supplied_result is not None:
                 result = supplied_result
             else:
-                try:
-                    result = self._sip_source.fetch_daily_bar(
-                        ticker, session, now=fetched_at
-                    )
-                except Exception:
-                    return None, AlpacaBarFailure.TRANSPORT_ERROR, fetched_at
+                result = self._sip_source.fetch_daily_bar(
+                    ticker, session, now=fetched_at
+                )
         if not isinstance(result, AlpacaDailyBarResult):
             return None, AlpacaBarFailure.INVALID_RESPONSE, fetched_at
         if result.failure is not None:
@@ -786,6 +785,7 @@ class AlpacaSIPPriceSource:
         attempts: list[CandidateBarAttempt] = []
         failures: set[str] = set()
         eligibility_evidence: dict[str, dict] = {}
+        local_failures: dict[str, str] = {}
         symbols = list(dict.fromkeys(tickers))
         batch_fetch = getattr(self._sip_source, "fetch_daily_bars", None)
         # Keep scalar public/provider implementations compatible. Native batches
@@ -822,7 +822,7 @@ class AlpacaSIPPriceSource:
                                 else {}
                             ),
                         )
-                    except Exception:
+                    except (TimeoutError, ConnectionError):
                         batch_results = {
                             ticker: AlpacaDailyBarResult(
                                 None,
@@ -846,6 +846,8 @@ class AlpacaSIPPriceSource:
                 result = (
                     batch_results.get(ticker) if batch_results is not None else None
                 )
+                if result is None and not use_batch and (ticker, session) not in self._bars:
+                    result = self._sip_source.fetch_daily_bar(ticker, session, now=self._now())
                 if (
                     batch_results is not None
                     and ticker in batch_results
@@ -911,12 +913,22 @@ class AlpacaSIPPriceSource:
                     bars[(ticker, session)] = bar
                 else:
                     failures.add(ticker)
+                    # Diagnostic text is not symbol-local provider evidence.
+                    if (isinstance(result, AlpacaDailyBarResult)
+                            and result.failure == AlpacaBarFailure.INVALID_RESPONSE
+                            and result.reason_code == "missing_data"
+                            and result.response_symbol == ticker
+                            and result.row_count == 0
+                            and result.pagination_complete is True
+                            and result.request_start == datetime.combine(session, datetime.min.time(), _ET)):
+                        local_failures[ticker] = "missing_data"
         return CandidateBarResolution(
             bars,
             tuple(attempts),
             frozenset(),
             frozenset(failures),
             eligibility_evidence if self._capture_eligibility else None,
+            local_failures,
         )
 
     def resolve_governed_daily_bars(

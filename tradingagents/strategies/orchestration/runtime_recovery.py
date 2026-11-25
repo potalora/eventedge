@@ -136,6 +136,8 @@ def recover_owner(owner, session: date, *, now: datetime | None = None) -> dict:
             'policy_id', 'foundation-' + cohort['config'].horizon))
         if not ledger.staging_completed(session, epoch.epoch_id, policy_id):
             missing_stage.append((cohort, policy_id))
+    if not _reference_quarantines_recoverable(owner, session, missing_stage):
+        return _result('requires_user', 'checkpoint_invalid')
     with persisted_only():
         by_name = {plan.cohort['config'].name: plan for plan in plans} if plans is not None else {}
         for cohort in owner.cohorts:
@@ -421,13 +423,41 @@ def _hash_document(value) -> str:
         allow_nan=False).encode()).hexdigest()
 
 
+def _reference_quarantines_recoverable(owner, session, missing_stage=()) -> bool:
+    import sqlite3
+    from .candidate_inputs import validate_candidate_acceptance, validate_candidate_obligations
+
+    try:
+        store = owner._metric_store
+        quarantines = {record.ticker for record in store.read_session_candidate_bar_recoveries(
+            owner._epoch_id, session) if record.outcome == 'quarantined'}
+        issues = [issue for issue in store.read_session_candidate_input_issues(owner._epoch_id, session)
+                  if issue.dependency_kind == 'reference_bar']
+        if not quarantines and not issues:
+            return True
+        if len(issues) != 1 or quarantines != {issues[0].ticker}:
+            return False
+        missing_names = {cohort['config'].name for cohort, _ in missing_stage}
+        for cohort in owner.cohorts:
+            ledger, name = cohort['ledger'], cohort['config'].name
+            if name in missing_names:
+                validate_candidate_obligations(ledger._connection, issues[0])
+            else:
+                validate_candidate_acceptance(ledger._connection, issues[0], name)
+        return len(missing_names) < len(owner.cohorts)
+    except (ValueError, TypeError, KeyError, ArithmeticError, sqlite3.Error):
+        return False
+
+
 def _completed_owner_valid(owner, session, now) -> bool:
     from .daily_pipeline import DailyRunState, partition_daily_replay
     state = DailyRunState(owner=owner, trading_date=session.isoformat(), session=session,
                          processed_at=now, epoch_id=owner._epoch_id)
     with persisted_only():
         early = partition_daily_replay(state)
-    return early is None and len(state.completed) == len(owner.cohorts) and not state.stage_only and not state.execution_needed
+    return (early is None and len(state.completed) == len(owner.cohorts)
+            and not state.stage_only and not state.execution_needed
+            and _reference_quarantines_recoverable(owner, session))
 
 
 def session_recovery_proof(state, generation, session, epoch_id):
