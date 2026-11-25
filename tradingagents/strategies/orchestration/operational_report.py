@@ -429,8 +429,9 @@ def _book(state: Path, name: str, generation: str, session: str, epoch: str | No
     return result
 
 
-def _candidate_acceptance(state: Path, name: str, reference: dict, diagnose, *, allow_legacy_report: bool = False) -> bool:
-    from .candidate_inputs import validate_candidate_acceptance
+def _candidate_acceptance(state: Path, name: str, reference: dict, diagnose, *, allow_legacy_report: bool = False,
+                          reported_uncontained: bool = False) -> bool:
+    from .candidate_inputs import containment_key, reference_health_recorded, validate_candidate_acceptance
     try:
         with _database(_metrics_db_path(state)) as connection:
             row = connection.execute(
@@ -443,6 +444,13 @@ def _candidate_acceptance(state: Path, name: str, reference: dict, diagnose, *, 
                 raise ValueError('candidate issue reference conflict')
         path, _ = _cohort_db_path(state, name)
         with _database(path) as connection:
+            if (reported_uncontained and issue.dependency_kind == 'reference_bar'
+                    and not reference_health_recorded(connection, issue)
+                    and connection.execute('SELECT 1 FROM schema_metadata WHERE metadata_key=?',
+                                           (containment_key(issue, name),)).fetchone() is None):
+                # A recorded but uncontained failure is degraded evidence,
+                # not a missing acceptance that the worker claimed existed.
+                return False
             validate_candidate_acceptance(connection, issue, name, allow_legacy_report=allow_legacy_report)
         return True
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
@@ -891,10 +899,14 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                     for item in daily_wire.values())
         )
         for name, row in report['cohorts'].items():
+            wire_row = daily_wire.get(name, {}) if isinstance(daily_wire, dict) else {}
             row['staging_valid'] = row['staging_complete'] and (
                 not report['candidate_input_issues'] or (
                     isolated_insufficient_history(report['candidate_input_issues'])
-                    and all(_candidate_acceptance(state, name, issue, diagnose, allow_legacy_report=legacy_candidate_wire)
+                    and all(_candidate_acceptance(
+                                state, name, issue, diagnose, allow_legacy_report=legacy_candidate_wire,
+                                reported_uncontained=(wire_row.get('staging_valid') is False
+                                                      and 'candidate_input_acceptance' not in wire_row))
                             and issue['ticker'] not in row['staging_volatility']
                             for issue in report['candidate_input_issues'])))
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())

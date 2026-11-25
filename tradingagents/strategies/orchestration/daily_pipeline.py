@@ -2201,28 +2201,30 @@ def _resolve_candidate_bars(
                 final.fetched_at,
             ):
                 raise ValueError("candidate bar differs from successful final evidence")
-    # A singleton diagnostic is not proof; reuse already observed healthy bars.
+    # A singleton diagnostic is not proof; absence of proof leaves quarantine
+    # uncontained without interrupting eligibility or unrelated inputs.
     health_proofs = {}
-    from tradingagents.strategies.execution.price_source import validate_required_bars
+    from tradingagents.strategies.execution.price_source import BarValidationError, validate_required_bars
+    peers = {**state.governed_reference_bars, **{
+        symbol: bar for (symbol, _), bar in resolution.bars.items()
+    }}
     for ticker in quarantined:
         reason = (resolution.local_failures or {}).get(ticker)
         if reason not in {"missing_data", "stale_data", "invalid_data"}:
-            raise ValueError("candidate failure lacks typed symbol-local evidence")
-        source = attempts_by_ticker[ticker][-1].source
-        peers = {**state.governed_reference_bars,
-                 **{symbol: bar for (symbol, day), bar in resolution.bars.items()
-                    if day == state.session}}
-        healthy = None
+            continue
+        final = attempts_by_ticker[ticker][-1]
         for symbol, bar in sorted(peers.items()):
-            if symbol == ticker or bar.source != source:
+            if symbol == ticker or bar.source != final.source:
                 continue
-            validate_required_bars({(symbol, state.session): bar}, {symbol},
-                                   state.session, max(state.processed_at, attempts_by_ticker[ticker][-1].fetched_at), max_age)
-            healthy = bar
+            try:
+                validate_required_bars(
+                    {(symbol, state.session): bar}, {symbol}, state.session,
+                    max(state.processed_at, final.fetched_at), max_age,
+                )
+            except BarValidationError:
+                continue
+            health_proofs[ticker] = (reason, bar)
             break
-        if healthy is None:
-            raise ValueError("candidate failure lacks same-source healthy evidence")
-        health_proofs[ticker] = (reason, healthy)
     state.candidate_reference_bars.update(
         {
             ticker: bar
@@ -2252,7 +2254,7 @@ def _resolve_candidate_bars(
             else "recovered" if ticker in recovered else "accepted"
         )
         _save_candidate_bar_attempts(state, ticker, serialized_attempts, outcome, signals)
-        if ticker in quarantined:
+        if ticker in health_proofs:
             from .candidate_inputs import save_reference_health
             issue = next(issue for issue in state.owner._metric_store.read_session_candidate_input_issues(
                 state.epoch_id, state.session) if issue.ticker == ticker)
@@ -2746,6 +2748,7 @@ def run_candidate_volatility_validation(
 def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     """Persist regime snapshots, enrich once, and stage eligible cohorts."""
     all_signals = _all_signals(state)
+    containment_issue = None
     if isolated_insufficient_history(state.candidate_issue_references):
         # A reason code is not containment. Recheck the economic boundary and
         # filtered inputs before any committee/staging side effect in any book.
@@ -2757,20 +2760,29 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
             if len(durable) != 1 or durable[0].reference() != reference:
                 raise ValueError("candidate exclusion evidence mismatch")
             durable[0].validate_integrity()
-            from .candidate_inputs import validate_candidate_obligations, validate_candidate_acceptance
+            from .candidate_inputs import (reference_health_recorded, validate_candidate_obligations,
+                                           validate_candidate_acceptance)
+            issue = durable[0]
+            if issue.dependency_kind != "reference_bar" or all(
+                reference_health_recorded(cohort["ledger"]._connection, issue)
+                for cohort in state.owner.cohorts
+            ):
+                containment_issue = issue
+            proof_cohorts = state.owner.cohorts if containment_issue is not None else ()
             accepted_resume = False
-            for cohort in state.owner.cohorts:
-                validate_candidate_obligations(cohort["ledger"]._connection, durable[0])
-                if durable[0].issue_id in state.preexisting_candidate_issue_ids:
+            for cohort in proof_cohorts:
+                validate_candidate_obligations(cohort["ledger"]._connection, issue)
+                if issue.issue_id in state.preexisting_candidate_issue_ids:
                     try:
-                        validate_candidate_acceptance(cohort["ledger"]._connection, durable[0], cohort["config"].name)
+                        validate_candidate_acceptance(cohort["ledger"]._connection, issue, cohort["config"].name)
                         accepted_resume = True
                     except ValueError:
                         pass
-            if (durable[0].issue_id in state.preexisting_candidate_issue_ids
+            if (containment_issue is not None
+                    and issue.issue_id in state.preexisting_candidate_issue_ids
                     and not accepted_resume):
                 raise ValueError("persisted candidate receipt lacks accepted staging proof")
-            if (
+            if containment_issue is not None and (
                 ticker in _eligibility_protected_tickers(state)
                 or state.shared_data.get("yfinance", {}).get("error")
                 or ticker in state.candidate_reference_bars
@@ -2778,7 +2790,7 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                 or (set(state.candidate_bar_quarantines) | state.volatility_quarantines) != {ticker}
             ):
                 raise ValueError("candidate exclusion is not contained")
-            for cohort in state.owner.cohorts:
+            for cohort in proof_cohorts:
                 ledger = cohort["ledger"]
                 if (
                     any(row["ticker"] == ticker for row in ledger.policy_open_lot_projection(state.session))
@@ -2794,7 +2806,7 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
             return state.fail_candidates("candidate input containment failed", degraded=True)
     staging_valid = not (
         (state.candidate_bar_quarantines or state.volatility_quarantines)
-        and not isolated_insufficient_history(state.candidate_issue_references)
+        and containment_issue is None
     )
     if state.horizon_signals:
         selected_horizon = (
@@ -2979,11 +2991,10 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                     'decisions': state.new_entry_eligibility['decisions'],
                     'excluded_tickers': sorted(state.ineligible_new_entries),
                 }
-            if isolated_insufficient_history(state.candidate_issue_references):
+            if containment_issue is not None:
                 from .candidate_inputs import (candidate_acceptance_payload, containment_key,
                                                validate_candidate_obligations)
-                issue = state.owner._metric_store.read_session_candidate_input_issues(
-                    state.epoch_id, state.session)[0]
+                issue = containment_issue
                 ledger = cohort["ledger"]
                 validate_candidate_obligations(ledger._connection, issue)
                 proof = candidate_acceptance_payload(ledger._connection, issue, cfg.name)

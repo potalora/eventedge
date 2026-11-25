@@ -105,6 +105,42 @@ def test_real_recovery_report_uses_distinct_proof_and_preserves_original_attempt
     assert not fixture.blocked_calls
 
 
+@pytest.mark.parametrize('proof', ['absent', 'valid', 'deleted', 'mutated'])
+def test_completed_reference_quarantine_recovery_requires_durable_proof(pipeline, monkeypatch, proof):
+    from dataclasses import replace
+
+    fixture, owner, _, _ = prospective(pipeline, monkeypatch)
+    fixture.fault = 'sip_unsupported'
+    if proof != 'absent':
+        source = owner._price_source
+        resolve = source.resolve_candidate_daily_bars
+
+        def typed_failure(*args, **kwargs):
+            result = resolve(*args, **kwargs)
+            return replace(result, local_failures={'NVDA': 'missing_data'})
+
+        monkeypatch.setattr(source, 'resolve_candidate_daily_bars', typed_failure)
+    wire = owner.run_daily(SESSION.isoformat())
+    assert len(wire) == 16 and all(not row['error'] for row in wire.values())
+    assert all(row['staging_valid'] is (proof != 'absent') for row in wire.values())
+    assert all(row['candidate_bar_quarantines'] == ['NVDA'] for row in wire.values())
+    assert all(cohort['ledger'].staging_completed(
+        SESSION, owner._epoch_id, owner._policy_id_for_horizon(cohort['config'].horizon)
+    ) for cohort in owner.cohorts)
+    calls, models = fixture.calls.copy(), fixture.model_calls.copy()
+    fixture.block_all = True
+    conn = owner.cohorts[0]['ledger']._connection
+    if proof == 'deleted':
+        assert conn.execute("DELETE FROM schema_metadata WHERE metadata_key LIKE 'candidate_reference_health:v1:%'").rowcount == 1
+        conn.commit()
+    elif proof == 'mutated':
+        assert conn.execute("UPDATE schema_metadata SET metadata_value='{}' WHERE metadata_key LIKE 'candidate_reference_health:v1:%'").rowcount == 1
+        conn.commit()
+    expected = (('recovered', 'complete') if proof == 'valid' else ('requires_user', 'checkpoint_invalid'))
+    assert recovery.recover_owner(owner, SESSION, now=fixture.now) == recovery._result(*expected)
+    assert fixture.calls == calls and fixture.model_calls == models and not fixture.blocked_calls
+
+
 def test_short_history_skip_recovers_with_unchanged_completion_gate(pipeline, monkeypatch):
     fixture, config, repo, state, path, manifest, attempts = build_recovered(
         pipeline, monkeypatch, short_history=True)

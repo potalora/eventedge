@@ -43,9 +43,26 @@ def test_unproven_sip_failure_cannot_stage_or_accept(tmp_path, monkeypatch, case
         signal_tickers=signals, stage_observations=staged,
         price_source=SimpleNamespace(resolve_candidate_daily_bars=resolve))
     try:
-        assert not staged
-        assert all(row['error'] and not row['staging_valid'] for row in results.values())
-        assert not owner._metric_store.read_candidate_input_issues(owner._epoch_id, SESSION)
+        assert len(results) == 16
+        assert all(not row['staging_valid'] for row in results.values())
+        issues = owner._metric_store.read_candidate_input_issues(owner._epoch_id, SESSION)
+        if case == 'defect':
+            assert not staged
+            assert all(row['error'] for row in results.values())
+            assert not issues
+        else:
+            assert [(issue.ticker, issue.dependency_kind) for issue in issues] == [('UI', 'reference_bar')]
+            assert set(staged) == set(results)
+            for name, observation in staged.items():
+                assert observation['signals'] == (() if case == 'no_peer' else ('NCL',))
+                assert 'UI' not in observation['reference_bars']
+                assert results[name]['candidate_input_issues'] == [issues[0].reference()]
+                assert 'candidate_input_acceptance' not in results[name]
+            for cohort in owner.cohorts:
+                assert not cohort['ledger']._connection.execute(
+                    "SELECT 1 FROM schema_metadata WHERE metadata_key LIKE 'candidate_reference_health:%' "
+                    "OR metadata_key LIKE 'candidate_containment:%'"
+                ).fetchone()
     finally:
         for cohort in owner.cohorts:
             cohort['ledger'].close()

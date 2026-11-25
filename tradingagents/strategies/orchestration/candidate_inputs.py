@@ -308,14 +308,23 @@ def save_reference_health(connection, issue: CandidateInputIssue, reason: str, p
     validate_reference_health(connection, issue)
 
 
+def _reference_health_row(connection, issue: CandidateInputIssue):
+    return connection.execute("SELECT metadata_value FROM schema_metadata WHERE metadata_key=?",
+                              (f"candidate_reference_health:v1:{issue.issue_id}",)).fetchone()
+
+
+def reference_health_recorded(connection, issue: CandidateInputIssue) -> bool:
+    """Presence only; acceptance must still validate the proof and obligations."""
+    return _reference_health_row(connection, issue) is not None
+
+
 def validate_reference_health(connection, issue: CandidateInputIssue) -> None:
     import hashlib
     from decimal import Decimal
     from datetime import timedelta
     from tradingagents.strategies.execution.models import MarketBar
     from tradingagents.strategies.execution.price_source import validate_required_bars
-    row = connection.execute("SELECT metadata_value FROM schema_metadata WHERE metadata_key=?",
-                             (f"candidate_reference_health:v1:{issue.issue_id}",)).fetchone()
+    row = _reference_health_row(connection, issue)
     if row is None:
         raise ValueError("candidate reference health proof missing")
     proof = json.loads(row[0])
