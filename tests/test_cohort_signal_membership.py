@@ -10,6 +10,7 @@ import pytest
 
 from test_portfolio_policy_ledger import _signal, _bind_policy_context, _ledger, CAPTURED_AT
 from test_session_executor import _policy_enabled_staging_fixture, FRIDAY
+from tradingagents.strategies.orchestration.session_executor import PHASES
 from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger, LedgerConflictError
 from tradingagents.strategies.orchestration.operational_report import _validate_committee_content
 
@@ -37,6 +38,113 @@ def test_later_cohort_stages_its_exact_inputs_despite_foreign_signals(tmp_path):
         assert ledger.staging_completed(FRIDAY, 'epoch', 'shared-policy')
     finally:
         foreign.close()
+        ledger.close()
+
+
+@pytest.mark.parametrize('overlap', [False, True])
+def test_completed_policy_replay_ignores_later_horizon_inputs(tmp_path, monkeypatch, overlap):
+    import test_session_executor as fixtures
+    from tradingagents.strategies.trading.portfolio_committee import PortfolioCommittee
+
+    first, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    engine.ar_config['paper_ledger']['policy_id'] = 'shared-policy'
+    call['annualized_volatility_evidence'] = {'AAPL': 0.31}
+    rejected = deepcopy(call['shared_signals'][0])
+    rejected['direction'] = 'neutral'
+    rejected['metadata']['event_key'] = 'a-rejected'
+    call['shared_signals'].append(rejected)
+    second = None
+    try:
+        original = engine.screen_and_stage(**call)
+        original_intents = first.pending_intents(fixtures.MONDAY)
+        assert original_intents
+        original_digest = first.verify_session_phase_chain(FRIDAY, PHASES)
+        original_manifest = first.read_policy_staging_audit_manifests()
+        original_committee = first.committee_decision(FRIDAY, 'epoch', 'shared-policy')
+        with monkeypatch.context() as patch:
+            patch.setattr(fixtures, 'PortfolioLedger', lambda db, cohort, capital:
+                PortfolioLedger(db, 'horizon_1y_size_5k', capital))
+            second, later_engine, later_call = fixtures._policy_enabled_staging_fixture(tmp_path)
+        later_engine.ar_config['horizon'] = '1y'
+        later_engine.ar_config['paper_ledger']['policy_id'] = 'shared-policy'
+        later_call['annualized_volatility_evidence'] = {'AAPL': 0.31}
+        foreign = deepcopy(later_call['shared_signals'][0])
+        foreign['metadata']['event_key'] = 'b-only'
+        later_call['shared_signals'] = ([later_call['shared_signals'][0]] if overlap else []) + [foreign]
+        later = later_engine.screen_and_stage(**later_call)
+        a_ids = {row['signal_id'] for row in original['signals']}
+        b_ids = {row['signal_id'] for row in later['signals']}
+        assert bool(a_ids & b_ids) is overlap
+        assert b_ids - a_ids
+
+        def forbidden(*args, **kwargs):
+            pytest.fail('completed staging replay attempted fresh quote/model work')
+
+        monkeypatch.setattr(PortfolioCommittee, '__init__', forbidden)
+        monkeypatch.setattr(engine.data_acquisition, 'fetch_missing_prices', forbidden)
+        replay = engine.screen_and_stage(**{**call, 'data': {}, 'shared_signals': [],
+            'annualized_volatility_evidence': None})
+        assert replay['replayed'] is True
+        assert replay['signals'] == original['signals']
+        assert first.pending_intents(fixtures.MONDAY) == original_intents
+        assert first.verify_session_phase_chain(FRIDAY, PHASES) == original_digest
+        assert first.read_policy_staging_audit_manifests() == original_manifest
+        assert first.committee_decision(FRIDAY, 'epoch', 'shared-policy') == original_committee
+    finally:
+        if second is not None:
+            second.close()
+        first.close()
+
+
+@pytest.mark.parametrize('eligible', [False, True])
+@pytest.mark.parametrize('damage', ['missing_provenance', 'tampered_provenance', 'changed_signal', 'missing_signal'])
+def test_completed_policy_replay_rejects_damaged_local_inputs(tmp_path, eligible, damage):
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    call['annualized_volatility_evidence'] = {'AAPL': 0.31}
+    rejected = deepcopy(call['shared_signals'][0])
+    rejected['direction'] = 'neutral'
+    rejected['metadata']['event_key'] = 'local-rejected'
+    call['shared_signals'].append(rejected)
+    try:
+        engine.screen_and_stage(**call)
+        manifest, = ledger.read_policy_staging_audit_manifests()
+        target, = (set(manifest['ingress_signal_ids']) if eligible else
+            set(manifest['input_signal_ids']) - set(manifest['ingress_signal_ids']))
+        if damage == 'missing_provenance':
+            ledger.connection.execute("DELETE FROM policy_audit_records WHERE cohort_id=? "
+                "AND record_type='signal_policy_provenance' AND record_id=?", (ledger.cohort_id, target))
+        elif damage == 'tampered_provenance':
+            ledger.connection.execute("UPDATE policy_audit_records SET payload_json='{}' WHERE cohort_id=? "
+                "AND record_type='signal_policy_provenance' AND record_id=?", (ledger.cohort_id, target))
+        elif damage == 'changed_signal':
+            ledger.connection.execute("UPDATE signals SET event_key='changed' WHERE signal_id=?", (target,))
+        else:
+            # Model corrupt storage without foreign-key enforcement preventing the probe.
+            ledger.connection.execute('PRAGMA foreign_keys=OFF')
+            ledger.connection.execute('DELETE FROM signals WHERE signal_id=?', (target,))
+        with pytest.raises(LedgerConflictError):
+            engine.screen_and_stage(**{**call, 'data': {}, 'shared_signals': []})
+    finally:
+        ledger.close()
+
+
+@pytest.mark.parametrize('proof', ['legacy', 'absent'])
+def test_completed_policy_replay_keeps_historical_fail_closed_fallback(tmp_path, proof):
+    ledger, engine, call = _policy_enabled_staging_fixture(tmp_path)
+    call['annualized_volatility_evidence'] = {'AAPL': 0.31}
+    try:
+        engine.screen_and_stage(**call)
+        manifest, = ledger.read_policy_staging_audit_manifests()
+        if proof == 'legacy':
+            _rewrite_manifest(ledger, lambda payload: payload.pop('input_signal_ids'))
+            assert engine.screen_and_stage(**call)['replayed'] is True
+        else:
+            ledger.connection.execute("DELETE FROM policy_audit_records WHERE cohort_id=? "
+                "AND record_type='policy_staging_audit_manifest'", (ledger.cohort_id,))
+        ledger.record_signal(replace(_signal('foreign-only'), epoch_id='epoch', policy_id=manifest['policy_id']))
+        with pytest.raises(LedgerConflictError):
+            engine.screen_and_stage(**call)
+    finally:
         ledger.close()
 
 

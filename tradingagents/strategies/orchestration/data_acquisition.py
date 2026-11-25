@@ -563,9 +563,13 @@ class DataAcquisitionService:
         return data
 
     def fetch_missing_prices(
-        self, tickers: list[str], start_date: str, end_date: str
+        self, tickers: list[str], start_date: str, end_date: str, *, strict: bool = False
     ) -> dict[str, pd.DataFrame]:
-        """Fetch research prices for tickers not already in ``self.price_cache``."""
+        """Fetch missing research prices; candidate validation opts into explicit failures.
+
+        Legacy research acquisition remains best-effort. Strict callers must classify
+        source failures themselves rather than interpreting an empty cache as absence.
+        """
         from tradingagents.strategies.data_sources.yfinance_source import YFinanceSource
 
         missing = [t for t in tickers if t and t not in self.price_cache]
@@ -573,10 +577,18 @@ class DataAcquisitionService:
             return {t: self.price_cache[t] for t in tickers if t in self.price_cache}
         source = self.registry.get("yfinance")
         if not isinstance(source, YFinanceSource):
+            if strict:
+                raise SourceFetchError("Yahoo research source unavailable")
             return {t: self.price_cache[t] for t in tickers if t in self.price_cache}
         try:
             prices_df = source.fetch_prices(missing, start_date, end_date)
+            if strict and (not isinstance(prices_df, pd.DataFrame) or prices_df.empty):
+                # An empty download can be a swallowed HTTP/provider failure;
+                # do not manufacture per-symbol evidence from request cardinality.
+                raise SourceFetchError("Yahoo research history unavailable", reason_code="invalid_response")
         except Exception as exc:
+            if strict:
+                raise
             logger.warning("Tier-2 missing-price fetch failed for %s: %s", missing, exc)
             return {t: self.price_cache[t] for t in tickers if t in self.price_cache}
         if not prices_df.empty and isinstance(prices_df.columns, pd.MultiIndex):

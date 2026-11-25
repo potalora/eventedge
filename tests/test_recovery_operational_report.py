@@ -15,16 +15,22 @@ from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrc
 def build_recovered(pipeline, monkeypatch, *, original='failed', include_preflight=False, short_history=False):
     fixture, unused_owner, config, repo = prospective(pipeline, monkeypatch)
     if short_history:
-        engine = unused_owner.cohorts[0]['engine']
-        for method in ('_fetch_all_data', '_fetch_missing_prices'):
-            engine_class = type(engine)
-            original_fetch = getattr(engine_class, method)
-            def short_fetch(self, *args, _fetch=original_fetch, **kwargs):
-                result = _fetch(self, *args, **kwargs)
-                if 'NVDA' in self._price_cache:
-                    self._price_cache['NVDA'] = self._price_cache['NVDA'].tail(12)
-                return result
-            monkeypatch.setattr(engine_class, method, short_fetch)
+        engine_class = type(unused_owner.cohorts[0]['engine'])
+        original_fetch = engine_class._fetch_all_data
+        def short_fetch(self, *args, **kwargs):
+            result = original_fetch(self, *args, **kwargs)
+            if 'NVDA' in self._price_cache:
+                self._price_cache['NVDA'] = self._price_cache['NVDA'].tail(12)
+            return result
+        monkeypatch.setattr(engine_class, '_fetch_all_data', short_fetch)
+        service_class = type(unused_owner.cohorts[0]['engine'].data_acquisition)
+        original_missing = service_class.fetch_missing_prices
+        def short_missing(self, *args, **kwargs):
+            result = original_missing(self, *args, **kwargs)
+            if 'NVDA' in result:
+                result['NVDA'] = self.price_cache['NVDA'] = result['NVDA'].tail(12)
+            return result
+        monkeypatch.setattr(service_class, 'fetch_missing_prices', short_missing)
     from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
     complete = PortfolioLedger.complete_staging
     last_name = unused_owner.cohorts[-1]['config'].name

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
 from tradingagents.strategies.execution.contracts import POLICY_DOCUMENT_VERSION
 from tradingagents.strategies.execution.models import AccountSnapshot, MarketBar
 from tradingagents.strategies.orchestration.cohort_orchestrator import (
@@ -127,6 +128,7 @@ def _run_staging_matrix(
     fetch_error: Exception | None = None,
     mutate_before_fetch_error: bool = False,
     fail_stage_once_name: str | None = None,
+    price_source=None,
 ):
     config = deepcopy(DEFAULT_CONFIG)
     config["autoresearch"]["state_dir"] = str(tmp_path)
@@ -136,7 +138,7 @@ def _run_staging_matrix(
         config,
         generation_id="gen-volatility-fixture",
         generation_commit="fixture-commit",
-        price_source=object(),
+        price_source=price_source if price_source is not None else object(),
     )
     if fail_stage_once_name == "__first__":
         fail_stage_once_name = orchestrator.cohorts[0]["config"].name
@@ -150,7 +152,7 @@ def _run_staging_matrix(
     monkeypatch.setattr(first_engine, "_fetch_all_data", fetch_shared_data)
     missing_fetch_calls: list[tuple[tuple[str, ...], str, str]] = []
 
-    def fetch_missing_prices(tickers: list[str], start: str, end: str) -> None:
+    def fetch_missing_prices(tickers: list[str], start: str, end: str, *, strict=False) -> None:
         missing_fetch_calls.append((tuple(tickers), start, end))
         if fetch_error is not None and not mutate_before_fetch_error:
             raise fetch_error
@@ -162,6 +164,7 @@ def _run_staging_matrix(
             raise fetch_error
 
     monkeypatch.setattr(first_engine, "_fetch_missing_prices", fetch_missing_prices)
+    monkeypatch.setattr(first_engine.data_acquisition, "fetch_missing_prices", fetch_missing_prices)
     signals = [
         {
             "ticker": ticker,
@@ -742,7 +745,8 @@ def test_candidate_volatility_provider_exception_is_sanitized_into_issue(
         monkeypatch,
         histories,
         signal_tickers=("UI",),
-        fetch_error=RuntimeError(secret),
+        fetch_error=SourceFetchError(secret, reason_code="invalid_response",
+                                     failed_operations={"UI": "invalid_response"}),
     )
 
     try:
@@ -777,7 +781,8 @@ def test_candidate_provider_error_quarantines_even_after_valid_cache_mutation(
         refetch_histories={"UI": _history(0.031)},
         signal_tickers=("UI",),
         stage_observations=staged,
-        fetch_error=RuntimeError(secret),
+        fetch_error=SourceFetchError(secret, reason_code="invalid_response",
+                                     failed_operations={"UI": "invalid_response"}),
         mutate_before_fetch_error=True,
     )
 
@@ -796,7 +801,7 @@ def test_candidate_provider_error_quarantines_even_after_valid_cache_mutation(
         assert all(
             result["error"] is False
             and result["degraded"] is True
-            and result["staging_valid"] is False
+            and result["staging_valid"] is True
             and result["candidate_input_issues"] == [issues[0].reference()]
             for result in results.values()
         )
@@ -907,8 +912,8 @@ def test_equal_volatility_issue_replay_filters_without_candidate_refetch(
             raise AssertionError("candidate volatility refetched during equal replay")
 
         monkeypatch.setattr(
-            orchestrator.cohorts[0]["engine"],
-            "_fetch_missing_prices",
+            orchestrator.cohorts[0]["engine"].data_acquisition,
+            "fetch_missing_prices",
             unexpected_refetch,
         )
         replay = orchestrator.run_daily(SESSION.isoformat())
@@ -1005,7 +1010,7 @@ def test_candidate_volatility_retry_recovers_one_ticker_and_isolates_another(
         )
         assert all(
             result["error"] is False
-            and result["staging_valid"] is False
+            and result["staging_valid"] is True
             and result["candidate_input_issues"] == [issues[0].reference()]
             for result in results.values()
         )
@@ -1137,8 +1142,8 @@ def test_volatility_issue_tamper_fails_closed_without_candidate_refetch(
             raise AssertionError("candidate volatility refetched after issue tamper")
 
         monkeypatch.setattr(
-            orchestrator.cohorts[0]["engine"],
-            "_fetch_missing_prices",
+            orchestrator.cohorts[0]["engine"].data_acquisition,
+            "fetch_missing_prices",
             unexpected_refetch,
         )
         replay = orchestrator.run_daily(SESSION.isoformat())
@@ -1303,8 +1308,8 @@ def test_stored_candidate_volatility_issue_becoming_governed_fails_before_fetch(
             raise AssertionError("scope conflict performed volatility provider I/O")
 
         monkeypatch.setattr(
-            orchestrator.cohorts[0]["engine"],
-            "_fetch_missing_prices",
+            orchestrator.cohorts[0]["engine"].data_acquisition,
+            "fetch_missing_prices",
             unexpected_refetch,
         )
         replay = orchestrator.run_daily(SESSION.isoformat())

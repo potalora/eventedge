@@ -325,6 +325,22 @@ def _valid_daily_cohort_results(
             return False
         if result["degraded"] is False and result["staging_valid"] is not True:
             return False
+        if (candidate_issues and result["staging_valid"] is True
+                and candidate_issues[0]["reason_code"] != "insufficient_history"):
+            proof = result.get("candidate_input_acceptance")
+            reference_issue = candidate_issues[0]["dependency_kind"] == "reference_bar"
+            fields = {"version", "issue_sha256", "staging"}
+            if reference_issue:
+                fields.add("reference_health_sha256")
+            if (not isinstance(proof, dict) or set(proof) != fields
+                    or (reference_issue and not _fixed_digest(proof.get("reference_health_sha256"), ""))
+                    or type(proof.get("version")) is not int or proof["version"] != 1
+                    or not _fixed_digest(proof.get("issue_sha256"), "")
+                    or not isinstance(proof.get("staging"), (list, tuple))
+                    or len(proof["staging"]) != 7
+                    or any(not isinstance(value, str) or not value for value in proof["staging"])
+                    or proof["staging"][1:4] != [cohort_name, candidate_issues[0]["session"], candidate_issues[0]["epoch_id"]]):
+                return False
         if cohort_name in affected_by_issue and (
             result["degraded"] is not True or (
                 result["staging_valid"] is not False and not isolated_insufficient_history(candidate_issues))

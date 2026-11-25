@@ -1206,22 +1206,14 @@ class MultiStrategyEngine:
                 validate_book_source_scope(status, shared_regime, codec_limits=source_codec_limits(self.config))
                 if status.get('research_enrichment_scope') != enrichment_scope:
                     raise ValueError('research_enrichment_scope_conflict')
-            records = self.ledger.read_signals(
-                session, session, epoch_id=epoch_id, policy_id=policy_id
+            records = (
+                self.ledger.read_policy_staging_signals(session, epoch_id, policy_id)
+                if policy_config is not None
+                else self.ledger.read_signals(
+                    session, session, epoch_id=epoch_id, policy_id=policy_id
+                )
             )
             if policy_config is not None:
-                manifests = self.ledger.read_policy_staging_audit_manifests(
-                    epoch_id=epoch_id
-                )
-                matching = [
-                    item
-                    for item in manifests
-                    if item["session"] == session and item["policy_id"] == policy_id
-                ]
-                if len(matching) != 1:
-                    raise LedgerConflictError(
-                        "missing policy staging audit manifest on replay"
-                    )
                 for record in records:
                     if self.ledger.read_signal_policy_provenance(record.signal_id) is None:
                         raise LedgerConflictError(

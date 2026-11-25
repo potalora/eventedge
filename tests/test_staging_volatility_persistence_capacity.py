@@ -46,7 +46,8 @@ def _state(tmp_path, monkeypatch, histories):
         blocked_attempts.append(True)
         raise AssertionError("offline persistence fixture must not acquire inputs")
 
-    engine = SimpleNamespace(_price_cache=deepcopy(histories), _fetch_missing_prices=forbidden,
+    engine = SimpleNamespace(_price_cache=deepcopy(histories),
+                             data_acquisition=SimpleNamespace(fetch_missing_prices=forbidden),
                              blocked_attempts=blocked_attempts)
     metrics = SimpleNamespace(read_session_candidate_input_issues=lambda *args: (),
                               save_candidate_input_issue=forbidden)

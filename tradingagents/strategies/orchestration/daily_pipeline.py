@@ -85,6 +85,7 @@ class DailyRunState:
     results: dict[str, Any] = field(default_factory=dict)
     candidate_issue_references: list[dict[str, object]] = field(default_factory=list)
     candidate_issues_hydrated: bool = False
+    preexisting_candidate_issue_ids: set[str] = field(default_factory=set)
     candidate_bar_quarantine_suppressions: set[str] = field(default_factory=set)
     candidate_issue_reference_suppressions: set[str] = field(default_factory=set)
     governed_summaries_by_cohort: dict[str, list[dict[str, object]]] = field(
@@ -304,6 +305,21 @@ def finalize_daily_results(
             }
             - state.candidate_bar_quarantine_suppressions
         )
+    # A quarantine observation is not acceptance of a completed staging run.
+    if isolated_insufficient_history(state.candidate_issue_references):
+        from .candidate_inputs import validate_candidate_acceptance
+        issue = state.owner._metric_store.read_session_candidate_input_issues(
+            state.epoch_id, state.session)[0]
+        for cohort in state.owner.cohorts:
+            result = finalized.get(cohort["config"].name)
+            if not isinstance(result, dict) or not result.get("staging_valid"):
+                continue
+            try:
+                proof = validate_candidate_acceptance(cohort["ledger"]._connection, issue, cohort["config"].name)
+                if proof is not None:
+                    result["candidate_input_acceptance"] = json.loads(proof)
+            except Exception:
+                result["staging_valid"] = False
     apply_source_coverage(state, finalized)
     from .outcome_evidence import outcome_coverage
     for cohort in getattr(state.owner, "cohorts", ()):
@@ -484,7 +500,10 @@ def aggregate_candidate_input_issues(
             if (not isolated_insufficient_history(list(normalized.values()))
                     or result.get("error") is not False
                     or result.get("execution_valid") is not True
-                    or result.get("candidate_bar_quarantines")):
+                    or result.get("candidate_bar_quarantines", []) != [
+                        reference["ticker"] for reference in normalized.values()
+                        if reference["dependency_kind"] == "reference_bar"
+                    ]):
                 raise ValueError("candidate input issue reference collection is invalid")
     return sorted(
         normalized.values(),
@@ -1171,12 +1190,25 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
     from tradingagents.strategies.orchestration.session_executor import PHASES
 
     owner, session = state.owner, state.session
+    state.preexisting_candidate_issue_ids = {
+        issue.issue_id for issue in owner._metric_store.read_session_candidate_input_issues(state.epoch_id, session)
+    }
     state.session_candidate_quarantines = sorted(
         record.ticker
         for record in owner._metric_store.read_session_candidate_bar_recoveries(
             state.epoch_id, session
         )
         if record.outcome == "quarantined"
+    )
+    replay_issues = (
+        owner._metric_store.read_session_candidate_input_issues(state.epoch_id, session)
+        if state.session_candidate_quarantines else ()
+    )
+    replay_reference_skip = (
+        isolated_insufficient_history([issue.reference() for issue in replay_issues])
+        and state.session_candidate_quarantines == [
+            issue.ticker for issue in replay_issues if issue.dependency_kind == "reference_bar"
+        ]
     )
     complete_replays: dict[str, Any] = {}
     for cohort in owner.cohorts:
@@ -1207,6 +1239,15 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
                 state.governed_summaries_by_cohort[name] = [
                     dict(summary) for summary in persisted.governed_recovery_summaries
                 ]
+                if staging_complete:
+                    replay_signals = (
+                        ledger.read_policy_staging_signals(session, state.epoch_id, policy_id)
+                        if cohort.get("size_profile") is not None
+                        and isinstance(cohort["engine"].ar_config.get("portfolio_policy"), dict)
+                        else ledger.read_signals(
+                            session, session, epoch_id=state.epoch_id, policy_id=policy_id
+                        )
+                    )
             except Exception as error:
                 state.results[name] = failure_result(str(error))
                 return state.critical_gap(
@@ -1224,12 +1265,7 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
             complete_replays[name] = {
                 "signals": [
                     signal.__dict__
-                    for signal in ledger.read_signals(
-                        session,
-                        session,
-                        epoch_id=state.epoch_id,
-                        policy_id=policy_id,
-                    )
+                    for signal in replay_signals
                 ],
                 "recommendations": [],
                 "intents_staged": [],
@@ -1246,7 +1282,7 @@ def partition_daily_replay(state: DailyRunState) -> dict[str, Any] | None:
                 "error": False,
                 "degraded": bool(state.session_candidate_quarantines or summaries),
                 "execution_valid": True,
-                "staging_valid": not state.session_candidate_quarantines,
+                "staging_valid": not state.session_candidate_quarantines or replay_reference_skip,
                 "candidate_bar_quarantines": state.session_candidate_quarantines,
                 "governed_bar_recoveries": summaries,
                 "governed_failure_map": {},
@@ -2165,6 +2201,28 @@ def _resolve_candidate_bars(
                 final.fetched_at,
             ):
                 raise ValueError("candidate bar differs from successful final evidence")
+    # A singleton diagnostic is not proof; reuse already observed healthy bars.
+    health_proofs = {}
+    from tradingagents.strategies.execution.price_source import validate_required_bars
+    for ticker in quarantined:
+        reason = (resolution.local_failures or {}).get(ticker)
+        if reason not in {"missing_data", "stale_data", "invalid_data"}:
+            raise ValueError("candidate failure lacks typed symbol-local evidence")
+        source = attempts_by_ticker[ticker][-1].source
+        peers = {**state.governed_reference_bars,
+                 **{symbol: bar for (symbol, day), bar in resolution.bars.items()
+                    if day == state.session}}
+        healthy = None
+        for symbol, bar in sorted(peers.items()):
+            if symbol == ticker or bar.source != source:
+                continue
+            validate_required_bars({(symbol, state.session): bar}, {symbol},
+                                   state.session, max(state.processed_at, attempts_by_ticker[ticker][-1].fetched_at), max_age)
+            healthy = bar
+            break
+        if healthy is None:
+            raise ValueError("candidate failure lacks same-source healthy evidence")
+        health_proofs[ticker] = (reason, healthy)
     state.candidate_reference_bars.update(
         {
             ticker: bar
@@ -2194,6 +2252,12 @@ def _resolve_candidate_bars(
             else "recovered" if ticker in recovered else "accepted"
         )
         _save_candidate_bar_attempts(state, ticker, serialized_attempts, outcome, signals)
+        if ticker in quarantined:
+            from .candidate_inputs import save_reference_health
+            issue = next(issue for issue in state.owner._metric_store.read_session_candidate_input_issues(
+                state.epoch_id, state.session) if issue.ticker == ticker)
+            for cohort in state.owner.cohorts:
+                save_reference_health(cohort["ledger"]._connection, issue, *health_proofs[ticker])
     return None
 
 
@@ -2556,14 +2620,47 @@ def run_candidate_volatility_validation(
             floor=floor,
             expected_sessions=expected_sessions,
         )
+        from tradingagents.strategies.data_sources.fetch_errors import SourceFetchError
+
+        # Cache presence alone proves neither provenance nor provider health. Use
+        # independently valid histories from this run's same-source acquisition.
+        yahoo_payload = state.shared_data.get("yfinance", {})
+        healthy_source = False
+        if isinstance(yahoo_payload, dict) and not yahoo_payload.get("error"):
+            for healthy_ticker, history in yahoo_payload.get("prices", {}).items():
+                if healthy_ticker in candidate_refetch:
+                    continue
+                try:
+                    evidence = build_annualized_volatility_evidence(
+                        {healthy_ticker: history}, {healthy_ticker},
+                        lookback_sessions=lookback, floor=floor,
+                        expected_sessions=expected_sessions,
+                    )
+                    healthy_source = bool(evidence)
+                except (ValueError, TypeError, KeyError):
+                    continue
+                if healthy_source:
+                    break
         provider_errors: set[str] = set()
         retry_times: dict[str, datetime] = {}
         for ticker in candidate_refetch:
             try:
-                state.first_engine._fetch_missing_prices(
-                    [ticker], volatility_start, state.trading_date
+                # Legacy engine acquisition is deliberately best-effort.
+                # Only this candidate boundary opts into explicit acquisition.
+                state.first_engine.data_acquisition.fetch_missing_prices(
+                    [ticker], volatility_start, state.trading_date, strict=True
                 )
-            except Exception:
+            except SourceFetchError as error:
+                # A singleton request is not evidence of singleton failure.
+                # Unknown transport/provider errors and implementation defects
+                # must halt, even when a cache mutation happened before failure.
+                if (
+                    not healthy_source
+                    or set(error.failed_operations) != {ticker}
+                    or error.reason_code != "invalid_response"
+                    or set(error.failed_operations.values()) != {"invalid_response"}
+                ):
+                    raise
                 provider_errors.add(ticker)
             retry_times[ticker] = datetime.now(timezone.utc)
         remaining_invalid = set(
@@ -2575,6 +2672,12 @@ def run_candidate_volatility_validation(
                 expected_sessions=expected_sessions,
             )
         )
+        if (provider_errors or remaining_invalid) and not healthy_source:
+            raise ValueError("candidate failure lacks same-source healthy evidence")
+        if (provider_errors or remaining_invalid) and (
+            not isinstance(yahoo_payload, dict) or yahoo_payload.get("error")
+        ):
+            raise ValueError("candidate failure conflicts with source health")
         for ticker in candidate_refetch:
             if ticker not in provider_errors and ticker not in remaining_invalid:
                 continue
@@ -2643,9 +2746,55 @@ def run_candidate_volatility_validation(
 def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     """Persist regime snapshots, enrich once, and stage eligible cohorts."""
     all_signals = _all_signals(state)
+    if isolated_insufficient_history(state.candidate_issue_references):
+        # A reason code is not containment. Recheck the economic boundary and
+        # filtered inputs before any committee/staging side effect in any book.
+        try:
+            reference = state.candidate_issue_references[0]
+            ticker = str(reference["ticker"])
+            durable = state.owner._metric_store.read_session_candidate_input_issues(
+                state.epoch_id, state.session)
+            if len(durable) != 1 or durable[0].reference() != reference:
+                raise ValueError("candidate exclusion evidence mismatch")
+            durable[0].validate_integrity()
+            from .candidate_inputs import validate_candidate_obligations, validate_candidate_acceptance
+            accepted_resume = False
+            for cohort in state.owner.cohorts:
+                validate_candidate_obligations(cohort["ledger"]._connection, durable[0])
+                if durable[0].issue_id in state.preexisting_candidate_issue_ids:
+                    try:
+                        validate_candidate_acceptance(cohort["ledger"]._connection, durable[0], cohort["config"].name)
+                        accepted_resume = True
+                    except ValueError:
+                        pass
+            if (durable[0].issue_id in state.preexisting_candidate_issue_ids
+                    and not accepted_resume):
+                raise ValueError("persisted candidate receipt lacks accepted staging proof")
+            if (
+                ticker in _eligibility_protected_tickers(state)
+                or state.shared_data.get("yfinance", {}).get("error")
+                or ticker in state.candidate_reference_bars
+                or any(signal["ticker"] == ticker for signal in all_signals)
+                or (set(state.candidate_bar_quarantines) | state.volatility_quarantines) != {ticker}
+            ):
+                raise ValueError("candidate exclusion is not contained")
+            for cohort in state.owner.cohorts:
+                ledger = cohort["ledger"]
+                if (
+                    any(row["ticker"] == ticker for row in ledger.policy_open_lot_projection(state.session))
+                    or any(row["ticker"] == ticker for row in ledger.policy_pending_entry_projection())
+                    or any(signal.ticker == ticker for signal in ledger.read_signals(
+                        state.session, state.session, epoch_id=state.epoch_id))
+                    or any(row["ticker"] == ticker for row in ledger.read_policy_candidate_decisions(
+                        state.session, state.session, epoch_id=state.epoch_id))
+                ):
+                    raise ValueError("candidate exclusion conflicts with book obligations")
+        except Exception as error:
+            _log_boundary_failure("candidate_containment", state.session, error)
+            return state.fail_candidates("candidate input containment failed", degraded=True)
     staging_valid = not (
-        state.candidate_bar_quarantines or (state.volatility_quarantines
-            and not isolated_insufficient_history(state.candidate_issue_references))
+        (state.candidate_bar_quarantines or state.volatility_quarantines)
+        and not isolated_insufficient_history(state.candidate_issue_references)
     )
     if state.horizon_signals:
         selected_horizon = (
@@ -2830,6 +2979,18 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                     'decisions': state.new_entry_eligibility['decisions'],
                     'excluded_tickers': sorted(state.ineligible_new_entries),
                 }
+            if isolated_insufficient_history(state.candidate_issue_references):
+                from .candidate_inputs import (candidate_acceptance_payload, containment_key,
+                                               validate_candidate_obligations)
+                issue = state.owner._metric_store.read_session_candidate_input_issues(
+                    state.epoch_id, state.session)[0]
+                ledger = cohort["ledger"]
+                validate_candidate_obligations(ledger._connection, issue)
+                proof = candidate_acceptance_payload(ledger._connection, issue, cfg.name)
+                with ledger.transaction():
+                    ledger._connection.execute(
+                        "INSERT OR IGNORE INTO schema_metadata(metadata_key,metadata_value) VALUES (?,?)",
+                        (containment_key(issue, cfg.name), proof))
             state.results[cfg.name] = staged
         except Exception as error:
             logger.error("Cohort %s staging failed", cfg.name, exc_info=True)
