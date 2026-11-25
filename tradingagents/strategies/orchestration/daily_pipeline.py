@@ -2647,8 +2647,9 @@ def run_candidate_volatility_validation(
         retry_times: dict[str, datetime] = {}
         for ticker in candidate_refetch:
             try:
-                # Legacy engine acquisition is deliberately best-effort.
-                # Only this candidate boundary opts into explicit acquisition.
+                # Missing-only acquisition treats any cached frame as a hit.
+                # Evict only this already-invalid candidate before the strict fetch.
+                state.first_engine._price_cache.pop(ticker, None)
                 state.first_engine.data_acquisition.fetch_missing_prices(
                     [ticker], volatility_start, state.trading_date, strict=True
                 )
