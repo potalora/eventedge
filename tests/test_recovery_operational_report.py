@@ -12,8 +12,19 @@ from tradingagents.strategies.orchestration.operational_report import build_oper
 from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrchestrator, build_default_cohorts
 
 
-def build_recovered(pipeline, monkeypatch, *, original='failed', include_preflight=False):
+def build_recovered(pipeline, monkeypatch, *, original='failed', include_preflight=False, short_history=False):
     fixture, unused_owner, config, repo = prospective(pipeline, monkeypatch)
+    if short_history:
+        engine = unused_owner.cohorts[0]['engine']
+        for method in ('_fetch_all_data', '_fetch_missing_prices'):
+            engine_class = type(engine)
+            original_fetch = getattr(engine_class, method)
+            def short_fetch(self, *args, _fetch=original_fetch, **kwargs):
+                result = _fetch(self, *args, **kwargs)
+                if 'NVDA' in self._price_cache:
+                    self._price_cache['NVDA'] = self._price_cache['NVDA'].tail(12)
+                return result
+            monkeypatch.setattr(engine_class, method, short_fetch)
     from tradingagents.strategies.state.portfolio_ledger import PortfolioLedger
     complete = PortfolioLedger.complete_staging
     last_name = unused_owner.cohorts[-1]['config'].name
@@ -86,6 +97,34 @@ def test_real_recovery_report_uses_distinct_proof_and_preserves_original_attempt
     assert (repo / 'data/generations/manifest.json').read_bytes() == manifest
     assert {item.name: item.read_bytes() for item in (repo / 'data/logs/run_attempts').glob('*.json')} == attempts
     assert not fixture.blocked_calls
+
+
+def test_short_history_skip_recovers_with_unchanged_completion_gate(pipeline, monkeypatch):
+    fixture, config, repo, state, path, manifest, attempts = build_recovered(
+        pipeline, monkeypatch, short_history=True)
+    report = build_operational_report(repo, GENERATION, str(SESSION), snapshot_guaranteed=True)
+    assert report['evidence_complete'], report['diagnostics']
+    assert report['staging_valid'] and report['accounting_valid']
+    assert report['outcome'] == 'degraded'
+    assert report['recovery']['books_count'] == 16
+    assert [(row['ticker'], row['reason_code']) for row in report['candidate_input_issues']] == [
+        ('NVDA', 'insufficient_history')]
+    assert not fixture.blocked_calls
+
+    from scripts.recover_runtime import _terminal_report
+    from tradingagents.strategies.orchestration.operating_contract import (
+        OperatingProfile, POLICY, evaluate_completion,
+    )
+    from tradingagents.strategies.orchestration.operational_report import EXPECTED_COHORTS
+
+    # Attach the supported completion projection to the real recovered report.
+    profile = OperatingProfile(version=POLICY, roster=tuple(sorted(EXPECTED_COHORTS)),
+        profile_sha256=hashlib.sha256((state / 'generation-config.json').read_bytes()).hexdigest(),
+        horizon_policies={}, strategies=(), supported_strategies=(), declared_exclusions={},
+        exclusion_scope_sha256='', config=config, ledger_policy_id='')
+    report['completion'] = evaluate_completion(profile, {'report': report})
+    assert report['completion']['reason_codes'] == []
+    assert _terminal_report(report) == recovery._result('recovered', 'complete')
 
 
 @pytest.mark.parametrize('damage', ['receipt', 'source', 'committee', 'profile', 'cash'])

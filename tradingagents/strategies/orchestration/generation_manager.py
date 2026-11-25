@@ -281,6 +281,7 @@ def _extract_cohort_results(stdout: str) -> dict | None:
 def _valid_daily_cohort_results(
     cohort_results: dict, trading_date: str | None = None
 ) -> bool:
+    from tradingagents.strategies.orchestration.candidate_inputs import isolated_insufficient_history
     from tradingagents.strategies.orchestration.daily_pipeline import (
         aggregate_candidate_input_issues,
     )
@@ -325,7 +326,8 @@ def _valid_daily_cohort_results(
         if result["degraded"] is False and result["staging_valid"] is not True:
             return False
         if cohort_name in affected_by_issue and (
-            result["degraded"] is not True or result["staging_valid"] is not False
+            result["degraded"] is not True or (
+                result["staging_valid"] is not False and not isolated_insufficient_history(candidate_issues))
         ):
             return False
     return True

@@ -14,6 +14,9 @@ from decimal import Decimal
 from typing import Any, Iterable
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
+from tradingagents.strategies.orchestration.candidate_inputs import (
+    isolated_insufficient_history, qualifying_short_history,
+)
 from tradingagents.strategies.orchestration.run_outcome import RunOutcome
 from tradingagents.strategies.orchestration.source_coverage import (
     aggregate_source_health_failures, apply_source_coverage,
@@ -45,8 +48,9 @@ _CANDIDATE_ISSUE_REFERENCE_KEYS = frozenset(
 )
 _CANDIDATE_DEPENDENCY_KINDS = frozenset({"reference_bar", "volatility_history"})
 _CANDIDATE_REASON_CODES = frozenset(
-    {"provider_error", "missing_data", "stale_data", "invalid_data"}
+    {"provider_error", "missing_data", "stale_data", "invalid_data", "insufficient_history"}
 )
+
 _GOVERNED_FAILURE_KINDS = frozenset(
     {"missing", "incoherent", "invalid", "invalid_benchmark"}
 )
@@ -285,7 +289,8 @@ def finalize_daily_results(
             continue
         result["candidate_input_issues"] = references
         result["degraded"] = True
-        result["staging_valid"] = False
+        if not isolated_insufficient_history(state.candidate_issue_references):
+            result["staging_valid"] = False
         result["candidate_bar_quarantines"] = sorted(
             {
                 *result["candidate_bar_quarantines"],
@@ -355,7 +360,7 @@ def aggregate_candidate_input_issues(
             or not references
             or len(references) > _MAX_CANDIDATE_ISSUE_REFERENCES
             or result.get("degraded") is not True
-            or result.get("staging_valid") is not False
+            or type(result.get("staging_valid")) is not bool
         ):
             raise ValueError("candidate input issue reference collection is invalid")
         for reference in references:
@@ -397,6 +402,7 @@ def aggregate_candidate_input_issues(
                 or not isinstance(reason_code, str)
                 or dependency_kind not in _CANDIDATE_DEPENDENCY_KINDS
                 or reason_code not in _CANDIDATE_REASON_CODES
+                or (reason_code == "insufficient_history" and dependency_kind != "volatility_history")
                 or ticker != ticker.upper()
                 or _MARKET_TICKER_RE.fullmatch(ticker) is None
                 or not isinstance(affected, (list, tuple))
@@ -473,6 +479,13 @@ def aggregate_candidate_input_issues(
         raise ValueError("candidate input issue reference coverage is invalid")
     if len(observed_epochs) > 1 or len(observed_sessions) > 1:
         raise ValueError("candidate input issue reference run scope is invalid")
+    for result in results.values():
+        if isinstance(result, dict) and result.get("candidate_input_issues") and result.get("staging_valid") is True:
+            if (not isolated_insufficient_history(list(normalized.values()))
+                    or result.get("error") is not False
+                    or result.get("execution_valid") is not True
+                    or result.get("candidate_bar_quarantines")):
+                raise ValueError("candidate input issue reference collection is invalid")
     return sorted(
         normalized.values(),
         key=lambda reference: (
@@ -1005,12 +1018,12 @@ def _candidate_volatility_history_evidence(
     digest_sessions: list[str] = []
     for value in frame.index:
         try:
-            if isinstance(value, datetime):
+            if isinstance(value, pd.Timestamp) and not pd.isna(value):
+                normalized = value.date()
+            elif isinstance(value, datetime):
                 normalized = value.date()
             elif isinstance(value, date):
                 normalized = value
-            elif isinstance(value, pd.Timestamp) and not pd.isna(value):
-                normalized = value.date()
             else:
                 raise ValueError("invalid session")
             digest_sessions.append(normalized.isoformat())
@@ -1066,6 +1079,8 @@ def _candidate_volatility_history_evidence(
     if len(observed_sessions) < len(expected_sessions):
         if observed_sessions and observed_sessions[-1] < expected_sessions[-1]:
             return "stale_data", observed_sessions, returned_digest
+        if qualifying_short_history(expected_sessions, observed_sessions):
+            return "insufficient_history", observed_sessions, returned_digest
         return "missing_data", observed_sessions, returned_digest
     if observed_sessions[-len(expected_sessions) :] != expected_sessions:
         if observed_sessions[-1] < expected_sessions[-1]:
@@ -2629,7 +2644,8 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     """Persist regime snapshots, enrich once, and stage eligible cohorts."""
     all_signals = _all_signals(state)
     staging_valid = not (
-        state.candidate_bar_quarantines or state.volatility_quarantines
+        state.candidate_bar_quarantines or (state.volatility_quarantines
+            and not isolated_insufficient_history(state.candidate_issue_references))
     )
     if state.horizon_signals:
         selected_horizon = (

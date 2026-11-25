@@ -18,6 +18,7 @@ from tradingagents.strategies.metrics.store import MetricStore
 from tradingagents.strategies.orchestration.daily_pipeline import (
     aggregate_candidate_input_issues, canonical_candidate_input_issue_summaries,
 )
+from tradingagents.strategies.orchestration.candidate_inputs import isolated_insufficient_history
 from tradingagents.strategies.orchestration.run_outcome import (
     DAILY_RESULT_ENVELOPE_KEYS, DAILY_RESULT_PREFIX, DAILY_RESULT_WIRE_VERSION,
 )
@@ -863,7 +864,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['staging_complete'] = all(row['staging_complete'] for row in report['cohorts'].values())
         report['candidate_input_issues'] = _candidate_issues(state,epoch,session,diagnose)
         for row in report['cohorts'].values():
-            row['staging_valid'] = row['staging_complete'] and not report['candidate_input_issues']
+            row['staging_valid'] = row['staging_complete'] and (
+                not report['candidate_input_issues'] or isolated_insufficient_history(report['candidate_input_issues']))
         report['staging_valid'] = all(row['staging_valid'] for row in report['cohorts'].values())
         report['source_health_failures'] = _health_coverage(health,epoch,session,diagnose,disabled,
             strategies={strategy.name for strategy in report_strategies})
@@ -975,7 +977,8 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
                 diagnose('wire_coverage_invalid')
         report['evidence_complete'] = not diagnostics
         if recovery is not None and report['evidence_complete'] and report['accounting_valid'] and report['staging_complete']:
-            report['outcome'] = ('clean' if report['input_coverage_valid'] and report['staging_valid'] else 'degraded')
+            report['outcome'] = ('clean' if report['input_coverage_valid'] and report['staging_valid']
+                                 and not report['candidate_input_issues'] else 'degraded')
         elif latest and latest['outcome']=='failed':
             report['outcome']='failed'
         elif report['evidence_complete'] and report['accounting_valid'] and latest:

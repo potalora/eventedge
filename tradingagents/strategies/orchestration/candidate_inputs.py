@@ -5,19 +5,19 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from types import MappingProxyType
-from typing import Literal, Mapping
+from typing import Literal, Mapping, Sequence
 
 import exchange_calendars
 import pandas as pd
 
 CandidateInputDependencyKind = Literal["reference_bar", "volatility_history"]
 CandidateInputReasonCode = Literal[
-    "provider_error", "missing_data", "stale_data", "invalid_data"
+    "provider_error", "missing_data", "stale_data", "invalid_data", "insufficient_history"
 ]
 
 _DEPENDENCY_KINDS = frozenset({"reference_bar", "volatility_history"})
 _REASON_CODES = frozenset(
-    {"provider_error", "missing_data", "stale_data", "invalid_data"}
+    {"provider_error", "missing_data", "stale_data", "invalid_data", "insufficient_history"}
 )
 _SIGNAL_IDENTITY_KEYS = frozenset({"event_key", "strategy"})
 _MAX_TEXT = 256
@@ -26,6 +26,26 @@ _MAX_SIGNAL_IDENTITIES = 64
 _MAX_COHORTS = 64
 _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CALENDAR = exchange_calendars.get_calendar("XNYS")
+
+
+def isolated_insufficient_history(issues: Sequence[Mapping[str, object]]) -> bool:
+    """Policy exception for one validated volatility-only skip, never a cohort subset."""
+    return (
+        len(issues) == 1
+        and issues[0]["dependency_kind"] == "volatility_history"
+        and issues[0]["reason_code"] == "insufficient_history"
+    )
+
+
+def qualifying_short_history(expected: Sequence[date], observed: Sequence[date]) -> bool:
+    from .trading_calendar import previous_session
+
+    return bool(
+        expected and observed and len(observed) < len(expected)
+        and tuple(observed) == tuple(expected[-len(observed):])
+        and all(previous_session(later) == earlier
+                for earlier, later in zip(expected, expected[1:]))
+    )
 
 
 def _is_xnys_session(session: date) -> bool:
@@ -152,6 +172,19 @@ class CandidateInputIssue:
             raise ValueError("candidate input issue history digest is invalid")
         if type(retryable) is not bool:
             raise ValueError("candidate input issue retryable is invalid")
+        if reason_code == "insufficient_history":
+            from .trading_calendar import previous_session
+
+            expected_sessions = _session_dates(
+                expected_sessions, field="expected_sessions", allow_duplicates=False
+            )
+            observed_sessions = _session_dates(
+                observed_sessions, field="observed_sessions", allow_duplicates=False
+            )
+            if (dependency_kind != "volatility_history" or retryable
+                    or not qualifying_short_history(expected_sessions, observed_sessions)
+                    or expected_sessions[-1] != previous_session(canonical_session)):
+                raise ValueError("candidate input issue insufficient history evidence is invalid")
         return cls(
             issue_id=_bounded_text(issue_id, field="issue_id"),
             epoch_id=_bounded_text(epoch_id, field="epoch_id"),
