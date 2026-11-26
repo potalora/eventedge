@@ -335,7 +335,7 @@ def test_completed_staging_with_candidate_quarantine_reconciles_durable_issues(n
         assert report['performance_claims_withheld'] is True
 
 
-@pytest.mark.parametrize('damage', [None, 'missing', 'stale', 'cash'])
+@pytest.mark.parametrize('damage', [None, 'missing', 'stale', 'cash', 'clean_unproved'])
 def test_isolated_short_history_report_retains_valid_staging(native_evidence, damage):
     from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
     repo, state, wire = native_evidence
@@ -364,8 +364,8 @@ def test_isolated_short_history_report_retains_valid_staging(native_evidence, da
     envelope['digest'] = hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
     path.write_text(SourceInputStore.encode(envelope))
     for row in wire.values():
-        row.update(degraded=True, staging_valid=True, candidate_input_issues=[ref])
-    _attempt(repo, wire, outcome='degraded')
+        row.update(degraded=damage != 'clean_unproved', staging_valid=True, candidate_input_issues=[ref])
+    _attempt(repo, wire, outcome='clean' if damage == 'clean_unproved' else 'degraded')
     report = _report(repo)
     if damage is None:
         assert report['evidence_complete'], report['diagnostics']

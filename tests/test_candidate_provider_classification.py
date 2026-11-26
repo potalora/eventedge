@@ -124,3 +124,57 @@ def test_strict_acquisition_preserves_failure_while_legacy_stays_best_effort(mon
     assert service.fetch_missing_prices(["UI"], "2026-01-01", "2026-07-31") == {}
     with pytest.raises(RuntimeError, match="unexpected strategy defect"):
         service.fetch_missing_prices(["UI"], "2026-01-01", "2026-07-31", strict=True)
+
+
+@pytest.mark.parametrize("response", ["full", "short", "unknown_empty"])
+def test_invalid_cached_candidate_history_reaches_strict_yahoo_acquisition(
+    tmp_path, monkeypatch, response
+):
+    from tradingagents.strategies.orchestration import daily_pipeline
+
+    full = _history(.031)
+    short = full.tail(12)
+    source = YFinanceSource()
+    requests = []
+
+    def fetch_prices(tickers, start, end):
+        requests.append((tickers, start, end))
+        return {"full": full, "short": short, "unknown_empty": full.iloc[:0]}[response]
+
+    monkeypatch.setattr(source, "fetch_prices", fetch_prices)
+    original = daily_pipeline.run_candidate_volatility_validation
+
+    def validate(state):
+        service = state.first_engine.data_acquisition
+        monkeypatch.setattr(service, "registry", SimpleNamespace(get=lambda name: source))
+        monkeypatch.setattr(service, "fetch_missing_prices", DataAcquisitionService.fetch_missing_prices.__get__(service))
+        return original(state)
+
+    monkeypatch.setattr(daily_pipeline, "run_candidate_volatility_validation", validate)
+    staged = {}
+    owner, results, _ = _run_staging_matrix(
+        tmp_path, monkeypatch, {"UI": short, "NCL": _history(.033)},
+        signal_tickers=("UI", "NCL"), open_tickers=(), pending_tickers=(),
+        stage_observations=staged,
+    )
+    try:
+        assert len(requests) == 1, "invalid cache must not satisfy the strict history refresh"
+        tickers, start, end = requests[0]
+        assert tickers == ["UI"] and start <= full.index[-61].date().isoformat()
+        assert end == SESSION.isoformat()
+        assert len(results) == 16
+        issues = owner._metric_store.read_candidate_input_issues(owner._epoch_id, SESSION)
+        if response == "full":
+            assert len(staged) == 16 and all("UI" in row["signals"] for row in staged.values())
+            assert all(row["staging_valid"] and not row["degraded"] for row in results.values())
+            assert not issues
+        elif response == "short":
+            assert len(staged) == 16 and all("UI" not in row["signals"] for row in staged.values())
+            assert all(row["staging_valid"] and not row["degraded"] for row in results.values())
+            assert [(issue.ticker, issue.reason_code) for issue in issues] == [("UI", "insufficient_history")]
+        else:
+            assert not staged and not issues
+            assert all(row["error"] and not row["staging_valid"] for row in results.values())
+    finally:
+        for cohort in owner.cohorts:
+            cohort["ledger"].close()

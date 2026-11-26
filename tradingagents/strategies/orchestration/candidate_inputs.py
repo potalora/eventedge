@@ -28,6 +28,21 @@ _SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CALENDAR = exchange_calendars.get_calendar("XNYS")
 
 
+def short_history_only(issues: Sequence[Mapping[str, object]]) -> bool:
+    """Classify already validated evidence, never authorize acceptance itself."""
+    return (
+        isinstance(issues, Sequence)
+        and not isinstance(issues, (str, bytes))
+        and bool(issues)
+        and all(
+            isinstance(issue, Mapping)
+            and issue.get("dependency_kind") == "volatility_history"
+            and issue.get("reason_code") == "insufficient_history"
+            for issue in issues
+        )
+    )
+
+
 def isolated_insufficient_history(issues: Sequence[Mapping[str, object]]) -> bool:
     """One validated disposable-input skip, never a cohort-local subset.
 
@@ -35,8 +50,11 @@ def isolated_insufficient_history(issues: Sequence[Mapping[str, object]]) -> boo
     Call only after canonical evidence/scope validation and exclusion from staging;
     this is not evidence of listing age, provider health, or economic safety.
     """
-    return (
-        len(issues) == 1
+    return short_history_only(issues) or (
+        isinstance(issues, Sequence)
+        and not isinstance(issues, (str, bytes))
+        and len(issues) == 1
+        and isinstance(issues[0], Mapping)
         and issues[0].get("dependency_kind") in _DEPENDENCY_KINDS
         and issues[0].get("reason_code") in _REASON_CODES
         and (issues[0].get("dependency_kind") != "reference_bar"

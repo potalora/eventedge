@@ -147,13 +147,14 @@ def test_short_history_skip_recovers_with_unchanged_completion_gate(pipeline, mo
     report = build_operational_report(repo, GENERATION, str(SESSION), snapshot_guaranteed=True)
     assert report['evidence_complete'], report['diagnostics']
     assert report['staging_valid'] and report['accounting_valid']
-    assert report['outcome'] == 'degraded'
+    assert report['outcome'] == 'clean'
     assert report['recovery']['books_count'] == 16
     assert [(row['ticker'], row['reason_code']) for row in report['candidate_input_issues']] == [
         ('NVDA', 'insufficient_history')]
     assert not fixture.blocked_calls
 
     from scripts.recover_runtime import _terminal_report
+    assert _terminal_report(report) == recovery._result('recovered', 'complete')
     from tradingagents.strategies.orchestration.operating_contract import (
         OperatingProfile, POLICY, evaluate_completion,
     )

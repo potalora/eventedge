@@ -149,7 +149,20 @@ def test_only_isolated_short_history_can_carry_valid_staging(damage):
         first['candidate_bar_quarantines'] = ['OTHER']
     elif damage == 'scope':
         first['candidate_input_issues'][0]['affected_cohorts'] = COHORTS[:-1]
-    if damage is None:
+    if damage == 'multiple':
+        assert aggregate_candidate_input_issues(results, SESSION) == refs
+        assert not _valid_daily_cohort_results(results, SESSION)
+        for cohort_name, row in results.items():
+            row['candidate_input_acceptance'] = [
+                {
+                    'version': 1,
+                    'issue_sha256': f'{index:064x}',
+                    'staging': ['stage-1', cohort_name, SESSION, item['epoch_id'], 'foundation-30d', '2026-08-10T20:00:00+00:00', 'sha256:abc'],
+                }
+                for index, item in enumerate(refs, start=1)
+            ]
+        assert _valid_daily_cohort_results(results, SESSION)
+    elif damage is None:
         assert aggregate_candidate_input_issues(results, SESSION) == refs
         assert _valid_daily_cohort_results(results, SESSION)
     else:

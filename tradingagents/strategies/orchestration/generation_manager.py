@@ -183,7 +183,13 @@ def _normalize_daily_candidate_issues(
             **diagnostics,
         }
     outcome = result.get("outcome")
-    consistent = result.get("success") is False and (
+    from .candidate_inputs import short_history_only
+    consistent = (outcome == RunOutcome.CLEAN.value
+                  and result.get('success') is True
+                  and ("degraded" not in result or result.get("degraded") is False)
+                  and result.get('execution_valid') is True
+                  and result.get('input_coverage_valid') is True
+                  and short_history_only(candidate_issues)) or result.get("success") is False and (
         (
             outcome == RunOutcome.DEGRADED.value
             and result.get("degraded") is True
@@ -191,7 +197,11 @@ def _normalize_daily_candidate_issues(
         )
         or (
             outcome == RunOutcome.FAILED.value
-            and ("degraded" not in result or result.get("degraded") is True)
+            and (
+                "degraded" not in result
+                or result.get("degraded") is True
+                or (result.get("degraded") is False and short_history_only(candidate_issues))
+            )
         )
     )
     if not consistent:
@@ -281,7 +291,7 @@ def _extract_cohort_results(stdout: str) -> dict | None:
 def _valid_daily_cohort_results(
     cohort_results: dict, trading_date: str | None = None
 ) -> bool:
-    from tradingagents.strategies.orchestration.candidate_inputs import isolated_insufficient_history
+    from tradingagents.strategies.orchestration.candidate_inputs import isolated_insufficient_history, short_history_only
     from tradingagents.strategies.orchestration.daily_pipeline import (
         aggregate_candidate_input_issues,
     )
@@ -325,24 +335,40 @@ def _valid_daily_cohort_results(
             return False
         if result["degraded"] is False and result["staging_valid"] is not True:
             return False
-        if (candidate_issues and result["staging_valid"] is True
-                and candidate_issues[0]["reason_code"] != "insufficient_history"):
-            proof = result.get("candidate_input_acceptance")
-            reference_issue = candidate_issues[0]["dependency_kind"] == "reference_bar"
-            fields = {"version", "issue_sha256", "staging"}
-            if reference_issue:
-                fields.add("reference_health_sha256")
-            if (not isinstance(proof, dict) or set(proof) != fields
-                    or (reference_issue and not _fixed_digest(proof.get("reference_health_sha256"), ""))
-                    or type(proof.get("version")) is not int or proof["version"] != 1
-                    or not _fixed_digest(proof.get("issue_sha256"), "")
-                    or not isinstance(proof.get("staging"), (list, tuple))
-                    or len(proof["staging"]) != 7
-                    or any(not isinstance(value, str) or not value for value in proof["staging"])
-                    or proof["staging"][1:4] != [cohort_name, candidate_issues[0]["session"], candidate_issues[0]["epoch_id"]]):
+        legacy_pr76_wire = (
+            len(candidate_issues) == 1
+            and result["degraded"] is True
+            and candidate_issues[0]["reason_code"] == "insufficient_history"
+            and "candidate_input_acceptance" not in result
+        )
+        if candidate_issues and result["staging_valid"] is True and not legacy_pr76_wire:
+            raw_proofs = result.get("candidate_input_acceptance")
+            proofs = (
+                raw_proofs if len(candidate_issues) > 1 and isinstance(raw_proofs, list)
+                else [raw_proofs] if len(candidate_issues) == 1 and isinstance(raw_proofs, dict)
+                else None
+            )
+            if proofs is None or len(proofs) != len(candidate_issues):
                 return False
+            seen_digests: set[str] = set()
+            for proof, issue in zip(proofs, candidate_issues):
+                reference_issue = issue["dependency_kind"] == "reference_bar"
+                fields = {"version", "issue_sha256", "staging"}
+                if reference_issue:
+                    fields.add("reference_health_sha256")
+                if (not isinstance(proof, dict) or set(proof) != fields
+                        or (reference_issue and not _fixed_digest(proof.get("reference_health_sha256"), ""))
+                        or type(proof.get("version")) is not int or proof["version"] != 1
+                        or not _fixed_digest(proof.get("issue_sha256"), "")
+                        or proof["issue_sha256"] in seen_digests
+                        or not isinstance(proof.get("staging"), (list, tuple))
+                        or len(proof["staging"]) != 7
+                        or any(not isinstance(value, str) or not value for value in proof["staging"])
+                        or proof["staging"][1:4] != [cohort_name, issue["session"], issue["epoch_id"]]):
+                    return False
+                seen_digests.add(proof["issue_sha256"])
         if cohort_name in affected_by_issue and (
-            result["degraded"] is not True or (
+            (result["degraded"] is not True and not short_history_only(candidate_issues)) or (
                 result["staging_valid"] is not False and not isolated_insufficient_history(candidate_issues))
         ):
             return False
@@ -1535,6 +1561,7 @@ class GenerationManager:
             return {
                 "outcome": RunOutcome.CLEAN.value,
                 "success": True,
+                **({'candidate_input_issues': candidate_issues} if candidate_issues else {}),
                 "execution_valid": summary.execution_valid,
                 "input_coverage_valid": summary.input_coverage_valid,
                 "source_health_failures": list(summary.source_health_failures),

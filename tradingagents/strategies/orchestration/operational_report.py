@@ -18,7 +18,7 @@ from tradingagents.strategies.metrics.store import MetricStore
 from tradingagents.strategies.orchestration.daily_pipeline import (
     aggregate_candidate_input_issues, canonical_candidate_input_issue_summaries,
 )
-from tradingagents.strategies.orchestration.candidate_inputs import isolated_insufficient_history
+from tradingagents.strategies.orchestration.candidate_inputs import isolated_insufficient_history, short_history_only
 from tradingagents.strategies.orchestration.run_outcome import (
     DAILY_RESULT_ENVELOPE_KEYS, DAILY_RESULT_PREFIX, DAILY_RESULT_WIRE_VERSION,
 )
@@ -894,8 +894,14 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['candidate_input_issues'] = _candidate_issues(state,epoch,session,diagnose)
         daily_wire = latest.get('wire') if latest else None
         legacy_candidate_wire = (
-            isinstance(daily_wire, dict) and set(daily_wire) == set(EXPECTED_COHORTS)
-            and all(isinstance(item, dict) and 'candidate_input_acceptance' not in item
+            len(report['candidate_input_issues']) == 1
+            and latest is not None
+            and latest.get('outcome') == 'degraded'
+            and isinstance(daily_wire, dict) and set(daily_wire) == set(EXPECTED_COHORTS)
+            and all(isinstance(item, dict) and item.get('error') is False
+                    and item.get('degraded') is True
+                    and item.get('staging_valid') is True
+                    and 'candidate_input_acceptance' not in item
                     for item in daily_wire.values())
         )
         for name, row in report['cohorts'].items():
@@ -1021,7 +1027,9 @@ def build_operational_report(repo_root: str | Path, generation: str, session: st
         report['evidence_complete'] = not diagnostics
         if recovery is not None and report['evidence_complete'] and report['accounting_valid'] and report['staging_complete']:
             report['outcome'] = ('clean' if report['input_coverage_valid'] and report['staging_valid']
-                                 and not report['candidate_input_issues'] else 'degraded')
+                                 and (not report['candidate_input_issues']
+                                      or (short_history_only(report['candidate_input_issues'])
+                                          and not legacy_candidate_wire)) else 'degraded')
         elif latest and latest['outcome']=='failed':
             report['outcome']='failed'
         elif report['evidence_complete'] and report['accounting_valid'] and latest:
