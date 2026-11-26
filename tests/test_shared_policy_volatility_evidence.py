@@ -498,8 +498,14 @@ def test_isolated_short_history_candidate_is_skipped_in_all_books_without_invali
         assert issues[0].observed_sessions == tuple(day.date() for day in short.index)
         assert len(results) == len(staged) == 16
         assert all(not row["error"] and row["execution_valid"] and row["staging_valid"]
-                   and row["degraded"] and row["candidate_input_issues"] == [issues[0].reference()]
+                   and not row["degraded"] and row["candidate_input_issues"] == [issues[0].reference()]
                    for row in results.values())
+        from tradingagents.strategies.orchestration.generation_manager import _valid_daily_cohort_results
+        assert _valid_daily_cohort_results(results, SESSION.isoformat())
+        unproved = deepcopy(results)
+        for row in unproved.values():
+            row.pop('candidate_input_acceptance', None)
+        assert not _valid_daily_cohort_results(unproved, SESSION.isoformat())
         assert all(row == {"signals": ("NCL",), "reference_bars": ("NCL",)}
                    for row in staged.values())
         assert orchestrator.cohorts[0]["state"].load_latest_regime()["staging_valid"]
@@ -569,8 +575,9 @@ def test_short_history_with_another_issue_is_not_isolated(tmp_path, monkeypatch,
     try:
         issues = orchestrator._metric_store.read_candidate_input_issues(orchestrator._epoch_id, SESSION)
         assert len(issues) == 2 and issues[0].reason_code == 'insufficient_history'
-        assert all(not row['error'] and not row['staging_valid'] for row in results.values())
-        assert not orchestrator.cohorts[0]['state'].load_latest_regime()['staging_valid']
+        assert all(not row['error'] and row['staging_valid'] is other_short
+                   and row['degraded'] is not other_short for row in results.values())
+        assert orchestrator.cohorts[0]['state'].load_latest_regime()['staging_valid'] is other_short
     finally:
         for cohort in orchestrator.cohorts:
             cohort['ledger'].close()

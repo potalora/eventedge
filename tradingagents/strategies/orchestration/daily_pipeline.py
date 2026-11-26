@@ -15,7 +15,7 @@ from typing import Any, Iterable
 
 from tradingagents.strategies.metrics.models import GOVERNED_BAR_RECOVERY_CONTRACT, GOVERNED_SIP_RECOVERY_CONTRACT
 from tradingagents.strategies.orchestration.candidate_inputs import (
-    isolated_insufficient_history, qualifying_short_history,
+    isolated_insufficient_history, qualifying_short_history, short_history_only,
 )
 from tradingagents.strategies.orchestration.run_outcome import RunOutcome
 from tradingagents.strategies.orchestration.source_coverage import (
@@ -289,7 +289,8 @@ def finalize_daily_results(
         if not references:
             continue
         result["candidate_input_issues"] = references
-        result["degraded"] = True
+        if not short_history_only(state.candidate_issue_references):
+            result["degraded"] = True
         if not isolated_insufficient_history(state.candidate_issue_references):
             result["staging_valid"] = False
         result["candidate_bar_quarantines"] = sorted(
@@ -308,18 +309,32 @@ def finalize_daily_results(
     # A quarantine observation is not acceptance of a completed staging run.
     if isolated_insufficient_history(state.candidate_issue_references):
         from .candidate_inputs import validate_candidate_acceptance
-        issue = state.owner._metric_store.read_session_candidate_input_issues(
-            state.epoch_id, state.session)[0]
+        durable = state.owner._metric_store.read_session_candidate_input_issues(
+            state.epoch_id, state.session)
+        durable_by_id = {issue.issue_id: issue for issue in durable}
+        expected_by_id = {ref["issue_id"]: ref for ref in state.candidate_issue_references}
+        exact_durable = (
+            len(durable) == len(state.candidate_issue_references)
+            and {issue_id: issue.reference() for issue_id, issue in durable_by_id.items()} == expected_by_id
+        )
+        ordered_issues = (
+            [durable_by_id[ref["issue_id"]] for ref in state.candidate_issue_references]
+            if exact_durable else None
+        )
         for cohort in state.owner.cohorts:
             result = finalized.get(cohort["config"].name)
             if not isinstance(result, dict) or not result.get("staging_valid"):
                 continue
             try:
-                proof = validate_candidate_acceptance(cohort["ledger"]._connection, issue, cohort["config"].name)
-                if proof is not None:
-                    result["candidate_input_acceptance"] = json.loads(proof)
+                if not ordered_issues:
+                    raise ValueError("candidate exclusion evidence mismatch")
+                proofs = [json.loads(validate_candidate_acceptance(
+                    cohort["ledger"]._connection, issue, cohort["config"].name))
+                    for issue in ordered_issues]
+                result["candidate_input_acceptance"] = proofs[0] if len(proofs) == 1 else proofs
             except Exception:
                 result["staging_valid"] = False
+                result["degraded"] = True
     apply_source_coverage(state, finalized)
     from .outcome_evidence import outcome_coverage
     for cohort in getattr(state.owner, "cohorts", ()):
@@ -375,7 +390,7 @@ def aggregate_candidate_input_issues(
             not isinstance(references, (list, tuple))
             or not references
             or len(references) > _MAX_CANDIDATE_ISSUE_REFERENCES
-            or result.get("degraded") is not True
+            or type(result.get("degraded")) is not bool
             or type(result.get("staging_valid")) is not bool
         ):
             raise ValueError("candidate input issue reference collection is invalid")
@@ -496,6 +511,11 @@ def aggregate_candidate_input_issues(
     if len(observed_epochs) > 1 or len(observed_sessions) > 1:
         raise ValueError("candidate input issue reference run scope is invalid")
     for result in results.values():
+        if (isinstance(result, dict) and result.get("candidate_input_issues")
+                and result.get('degraded') is False
+                and (not short_history_only(list(normalized.values()))
+                     or (result.get('error') is not True and result.get('staging_valid') is not True))):
+            raise ValueError("candidate input issue reference collection is invalid")
         if isinstance(result, dict) and result.get("candidate_input_issues") and result.get("staging_valid") is True:
             if (not isolated_insufficient_history(list(normalized.values()))
                     or result.get("error") is not False
@@ -2749,65 +2769,64 @@ def run_candidate_volatility_validation(
 def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
     """Persist regime snapshots, enrich once, and stage eligible cohorts."""
     all_signals = _all_signals(state)
-    containment_issue = None
+    containment_issues = []
     if isolated_insufficient_history(state.candidate_issue_references):
-        # A reason code is not containment. Recheck the economic boundary and
-        # filtered inputs before any committee/staging side effect in any book.
+        # Validate the complete run-wide set before any staging side effect.
         try:
-            reference = state.candidate_issue_references[0]
-            ticker = str(reference["ticker"])
             durable = state.owner._metric_store.read_session_candidate_input_issues(
                 state.epoch_id, state.session)
-            if len(durable) != 1 or durable[0].reference() != reference:
+            if (len(durable) != len(state.candidate_issue_references)
+                    or {issue.issue_id: issue.reference() for issue in durable} != {
+                        ref['issue_id']: ref for ref in state.candidate_issue_references
+                    }):
                 raise ValueError("candidate exclusion evidence mismatch")
-            durable[0].validate_integrity()
             from .candidate_inputs import (reference_health_recorded, validate_candidate_obligations,
                                            validate_candidate_acceptance)
-            issue = durable[0]
-            if issue.dependency_kind != "reference_bar" or all(
-                reference_health_recorded(cohort["ledger"]._connection, issue)
-                for cohort in state.owner.cohorts
-            ):
-                containment_issue = issue
-            proof_cohorts = state.owner.cohorts if containment_issue is not None else ()
-            accepted_resume = False
-            for cohort in proof_cohorts:
-                validate_candidate_obligations(cohort["ledger"]._connection, issue)
-                if issue.issue_id in state.preexisting_candidate_issue_ids:
-                    try:
-                        validate_candidate_acceptance(cohort["ledger"]._connection, issue, cohort["config"].name)
-                        accepted_resume = True
-                    except ValueError:
-                        pass
-            if (containment_issue is not None
-                    and issue.issue_id in state.preexisting_candidate_issue_ids
-                    and not accepted_resume):
-                raise ValueError("persisted candidate receipt lacks accepted staging proof")
-            if containment_issue is not None and (
-                ticker in _eligibility_protected_tickers(state)
-                or state.shared_data.get("yfinance", {}).get("error")
-                or ticker in state.candidate_reference_bars
-                or any(signal["ticker"] == ticker for signal in all_signals)
-                or (set(state.candidate_bar_quarantines) | state.volatility_quarantines) != {ticker}
-            ):
-                raise ValueError("candidate exclusion is not contained")
-            for cohort in proof_cohorts:
-                ledger = cohort["ledger"]
-                if (
-                    any(row["ticker"] == ticker for row in ledger.policy_open_lot_projection(state.session))
-                    or any(row["ticker"] == ticker for row in ledger.policy_pending_entry_projection())
-                    or any(signal.ticker == ticker for signal in ledger.read_signals(
-                        state.session, state.session, epoch_id=state.epoch_id))
-                    or any(row["ticker"] == ticker for row in ledger.read_policy_candidate_decisions(
-                        state.session, state.session, epoch_id=state.epoch_id))
+            tickers = {issue.ticker for issue in durable}
+            for issue in durable:
+                issue.validate_integrity()
+                ticker = issue.ticker
+                if issue.dependency_kind == "reference_bar" and not all(
+                    reference_health_recorded(cohort["ledger"]._connection, issue)
+                    for cohort in state.owner.cohorts
                 ):
-                    raise ValueError("candidate exclusion conflicts with book obligations")
+                    continue
+                accepted_resume = False
+                for cohort in state.owner.cohorts:
+                    ledger = cohort["ledger"]
+                    validate_candidate_obligations(ledger._connection, issue)
+                    if issue.issue_id in state.preexisting_candidate_issue_ids:
+                        try:
+                            validate_candidate_acceptance(ledger._connection, issue, cohort["config"].name)
+                            accepted_resume = True
+                        except ValueError:
+                            pass
+                    if (
+                        any(row["ticker"] == ticker for row in ledger.policy_open_lot_projection(state.session))
+                        or any(row["ticker"] == ticker for row in ledger.policy_pending_entry_projection())
+                        or any(signal.ticker == ticker for signal in ledger.read_signals(
+                            state.session, state.session, epoch_id=state.epoch_id))
+                        or any(row["ticker"] == ticker for row in ledger.read_policy_candidate_decisions(
+                            state.session, state.session, epoch_id=state.epoch_id))
+                    ):
+                        raise ValueError("candidate exclusion conflicts with book obligations")
+                if issue.issue_id in state.preexisting_candidate_issue_ids and not accepted_resume:
+                    raise ValueError("persisted candidate receipt lacks accepted staging proof")
+                if (
+                    ticker in _eligibility_protected_tickers(state)
+                    or state.shared_data.get("yfinance", {}).get("error")
+                    or ticker in state.candidate_reference_bars
+                    or any(signal["ticker"] == ticker for signal in all_signals)
+                    or (set(state.candidate_bar_quarantines) | state.volatility_quarantines) != tickers
+                ):
+                    raise ValueError("candidate exclusion is not contained")
+                containment_issues.append(issue)
         except Exception as error:
             _log_boundary_failure("candidate_containment", state.session, error)
             return state.fail_candidates("candidate input containment failed", degraded=True)
     staging_valid = not (
         (state.candidate_bar_quarantines or state.volatility_quarantines)
-        and containment_issue is None
+        and (not containment_issues or len(containment_issues) != len(state.candidate_issue_references))
     )
     if state.horizon_signals:
         selected_horizon = (
@@ -2992,17 +3011,22 @@ def stage_daily_results(state: DailyRunState) -> dict[str, Any]:
                     'decisions': state.new_entry_eligibility['decisions'],
                     'excluded_tickers': sorted(state.ineligible_new_entries),
                 }
-            if containment_issue is not None:
+            if containment_issues:
                 from .candidate_inputs import (candidate_acceptance_payload, containment_key,
                                                validate_candidate_obligations)
-                issue = containment_issue
                 ledger = cohort["ledger"]
-                validate_candidate_obligations(ledger._connection, issue)
-                proof = candidate_acceptance_payload(ledger._connection, issue, cfg.name)
+                acceptances = []
+                for issue in containment_issues:
+                    validate_candidate_obligations(ledger._connection, issue)
+                    acceptances.append((
+                        containment_key(issue, cfg.name),
+                        candidate_acceptance_payload(ledger._connection, issue, cfg.name),
+                    ))
                 with ledger.transaction():
-                    ledger._connection.execute(
-                        "INSERT OR IGNORE INTO schema_metadata(metadata_key,metadata_value) VALUES (?,?)",
-                        (containment_key(issue, cfg.name), proof))
+                    for key, proof in acceptances:
+                        ledger._connection.execute(
+                            "INSERT OR IGNORE INTO schema_metadata(metadata_key,metadata_value) VALUES (?,?)",
+                            (key, proof))
             state.results[cfg.name] = staged
         except Exception as error:
             logger.error("Cohort %s staging failed", cfg.name, exc_info=True)

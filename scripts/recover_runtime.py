@@ -334,17 +334,24 @@ def _terminal_report(report):
     # New complete accepted evidence can prove recovery after an earlier
     # preflight source-access incident; keep that incident in the report, not as a sticky
     # blocker that contradicts the newer verified sample.
+    from tradingagents.strategies.orchestration.candidate_inputs import short_history_only
+    candidate_issues = report.get('candidate_input_issues') or ()
+    degrading_candidate_issues = bool(candidate_issues) and not (
+        report.get('staging_valid') is True
+        and report.get('outcome') == 'clean'
+        and short_history_only(candidate_issues)
+    )
     if (report.get('accounting_valid') and report.get('staging_complete')
             and report.get('evidence_complete')
             and not report.get('sources', {}).get('unresolved')
             and not report.get('source_health_failures')
-            and not report.get('candidate_input_issues')):
+            and not degrading_candidate_issues):
         return _result('recovered', 'complete')
     # Source HTTP denials, including historical preflights, cannot establish
     # model credential loss. Explicit worker auth results retain their contract;
     # accepted degraded samples follow the ordinary source-coverage policy.
     if report.get('staging_complete') and report.get('accounting_valid'):
-        if report.get('sources', {}).get('unresolved') or report.get('source_health_failures') or report.get('candidate_input_issues'):
+        if report.get('sources', {}).get('unresolved') or report.get('source_health_failures') or degrading_candidate_issues:
             return _result('wait_next_session', 'accepted_outcome')
         if report.get('evidence_complete'):
             return _result('recovered', 'complete')

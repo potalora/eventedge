@@ -170,7 +170,7 @@ def test_invalid_cached_candidate_history_reaches_strict_yahoo_acquisition(
             assert not issues
         elif response == "short":
             assert len(staged) == 16 and all("UI" not in row["signals"] for row in staged.values())
-            assert all(row["staging_valid"] and row["degraded"] for row in results.values())
+            assert all(row["staging_valid"] and not row["degraded"] for row in results.values())
             assert [(issue.ticker, issue.reason_code) for issue in issues] == [("UI", "insufficient_history")]
         else:
             assert not staged and not issues
