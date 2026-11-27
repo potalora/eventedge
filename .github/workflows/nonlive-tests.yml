@@ -22,6 +22,24 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e '.[chatgpt-plan]' pytest
+      - name: Guard against accidental large tracked files (>500 KiB)
+        run: |
+          python - <<'PY'
+          import os, subprocess, sys
+          ALLOW = {"uv.lock"}
+          LIMIT = 500 * 1024
+          tracked = subprocess.check_output(["git", "ls-files", "-z"]).split(b"\0")
+          bad = [
+              (p.decode(), os.path.getsize(p))
+              for p in tracked
+              if p and p.decode() not in ALLOW and os.path.getsize(p) > LIMIT
+          ]
+          if bad:
+              for path, size in sorted(bad, key=lambda x: -x[1]):
+                  print(f"ERROR: tracked file exceeds 500 KiB ({size} bytes): {path}", file=sys.stderr)
+              sys.exit(1)
+          print("OK: all tracked files (excluding uv.lock) are <= 500 KiB")
+          PY
       - name: Compile-check application and scripts
         run: python -m compileall -q tradingagents scripts
       - name: Replay recorded public historical sources
