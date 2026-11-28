@@ -70,6 +70,20 @@
       "evidence_sha256": "6970b70294881899bd3d16a6e1d5eaffec47e1b59968b51667c5dffc8446b124",
       "accepted_observation_id": null,
       "lesson_code": "validate_optional_consumed_numbers"
+    },
+    {
+      "case_id": "usda_native_crop_condition_timeout_20261127",
+      "source": "usda",
+      "provider": "usda",
+      "operation": "crop_condition",
+      "reason_code": "timeout",
+      "http_status": null,
+      "classification": "source_or_network",
+      "provenance": "native_observation",
+      "evidence_kind": "retained_diagnostic",
+      "evidence_sha256": "b975f48e23761e0f1ba9973bafbe1866fd26a1853ca108a51b39a501cbfdabbd",
+      "accepted_observation_id": "4b3d83a06cea4115c346aaf233341875818ffc956dbc73e2798afe729d8c34ac",
+      "lesson_code": "retain_unresolved_transport_evidence"
     }
   ]
 }

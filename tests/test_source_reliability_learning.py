@@ -291,6 +291,55 @@ def test_reviewed_public_catalog_keeps_noaa_uncertain_and_code_findings_separate
                and row['provenance'] == 'controlled_mutation' for row in value['cases'])
 
 
+def test_reviewed_public_catalog_retains_nov27_usda_timeout_bound_to_exact_observation():
+    module = unit()
+    repo_root = Path(__file__).resolve().parents[1]
+    value = json.loads((repo_root/'config/source-reliability-v1.json').read_text())
+    module.validate_catalog(value)
+    entry = next(row for row in value['cases']
+                 if row['case_id'] == 'usda_native_crop_condition_timeout_20261127')
+    assert entry['source'] == 'usda' and entry['provider'] == 'usda'
+    assert entry['operation'] == 'crop_condition' and entry['reason_code'] == 'timeout'
+    assert entry['http_status'] is None
+    assert entry['classification'] == 'source_or_network'
+    assert entry['provenance'] == 'native_observation'
+    assert entry['evidence_kind'] == 'retained_diagnostic'
+    assert entry['evidence_sha256'] == 'b975f48e23761e0f1ba9973bafbe1866fd26a1853ca108a51b39a501cbfdabbd'
+    assert entry['accepted_observation_id'] == '4b3d83a06cea4115c346aaf233341875818ffc956dbc73e2798afe729d8c34ac'
+    assert entry['lesson_code'] == 'retain_unresolved_transport_evidence'
+
+    exact_nov27 = {
+        'generation_id': 'gen_006',
+        'generation_commit': '5996e87bd19aae7a3528b287a14ebff4ef69c97c',
+        'session': '2026-11-27',
+        'sources': {
+            'configuration': 'c4a47aa3c7bb0ee0eca45f87cebb2ac1c1768bf6d5daffb13cd75ac80ad6d1b8',
+            'acquired_at': '2026-11-27T23:03:43.137029+00:00',
+            'observation_sha256': 'b3f41c149a64f465f381710456e1889d243567621974d4425de0fbf840043003',
+            'unresolved': [{
+                'source': 'usda', 'provider': 'usda', 'operation': 'crop_condition',
+                'reason_code': 'timeout', 'http_status': None, 'attempts': 3,
+            }],
+        },
+    }
+    exact_result = module.load_source_reliability(exact_nov27, repo_root)
+    row = exact_result['patterns'][0]
+    assert row['observation_id'] == entry['accepted_observation_id']
+    assert row['known_pattern'] is True
+    assert row['current_attribution'] == 'source_or_network'
+    assert row['current_empirical_evidence'] is True
+
+    later = deepcopy(exact_nov27)
+    later['session'] = '2026-11-30'
+    later['sources']['acquired_at'] = '2026-11-30T23:03:43+00:00'
+    later_result = module.load_source_reliability(later, repo_root)
+    later_row = later_result['patterns'][0]
+    assert later_row['known_pattern'] is True
+    assert later_row['current_attribution'] == 'unresolved'
+    assert later_row['current_empirical_evidence'] is False
+    assert later_result['review_required'] is True
+
+
 def test_actual_retained_noaa_failure_stays_reviewable_without_fabricated_acquisition_identity():
     import gzip
     import hashlib
