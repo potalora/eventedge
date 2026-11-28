@@ -286,8 +286,6 @@ class CohortOrchestrator:
         strategies = list(get_paper_trade_strategies())
         from .operating_contract import configure_strategies as stabilization_strategies
         strategies = stabilization_strategies(strategies, ar_config, full_config=base_config)
-        from .source_lifecycle_policy import configured as lifecycle_configured
-        lifecycle_configured(ar_config, strategies)
         strategy_names = tuple(
             getattr(strategy, "name", None) for strategy in strategies
         )

@@ -271,9 +271,6 @@ def load_journal(path: Path) -> dict:
             raise ValueError('state_corrupt')
         if 'launch_mode' in row or 'launch_intent' in row:
             validate_prospective_intent(row)
-        if 'operator_assessment_sha256' in row:
-            from .operator_assessment import validate_operator_assessment
-            validate_operator_assessment(path.parents[2], row, row['operator_assessment_sha256'])
     return document
 
 

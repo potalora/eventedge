@@ -335,13 +335,7 @@ def _valid_daily_cohort_results(
             return False
         if result["degraded"] is False and result["staging_valid"] is not True:
             return False
-        legacy_pr76_wire = (
-            len(candidate_issues) == 1
-            and result["degraded"] is True
-            and candidate_issues[0]["reason_code"] == "insufficient_history"
-            and "candidate_input_acceptance" not in result
-        )
-        if candidate_issues and result["staging_valid"] is True and not legacy_pr76_wire:
+        if candidate_issues and result["staging_valid"] is True:
             raw_proofs = result.get("candidate_input_acceptance")
             proofs = (
                 raw_proofs if len(candidate_issues) > 1 and isinstance(raw_proofs, list)

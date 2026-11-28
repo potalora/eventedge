@@ -2621,6 +2621,10 @@ def run_candidate_volatility_validation(
         )
         if governed_refetch:
             try:
+                # Missing-only acquisition treats any cached frame as a hit.
+                # Evict stale/invalid Tier-1 governed frames before refetching.
+                for ticker in governed_refetch:
+                    state.first_engine._price_cache.pop(ticker, None)
                 state.first_engine._fetch_missing_prices(
                     governed_refetch, volatility_start, state.trading_date
                 )
@@ -2663,7 +2667,7 @@ def run_candidate_volatility_validation(
                     continue
                 if healthy_source:
                     break
-        provider_errors: set[str] = set()
+        invalid_response_errors: set[str] = set()
         retry_times: dict[str, datetime] = {}
         for ticker in candidate_refetch:
             try:
@@ -2684,25 +2688,25 @@ def run_candidate_volatility_validation(
                     or set(error.failed_operations.values()) != {"invalid_response"}
                 ):
                     raise
-                provider_errors.add(ticker)
+                invalid_response_errors.add(ticker)
             retry_times[ticker] = datetime.now(timezone.utc)
         remaining_invalid = set(
             _invalid_volatility_histories(
                 state.first_engine,
-                set(candidate_refetch) - provider_errors,
+                set(candidate_refetch) - invalid_response_errors,
                 lookback=lookback,
                 floor=floor,
                 expected_sessions=expected_sessions,
             )
         )
-        if (provider_errors or remaining_invalid) and not healthy_source:
+        if (invalid_response_errors or remaining_invalid) and not healthy_source:
             raise ValueError("candidate failure lacks same-source healthy evidence")
-        if (provider_errors or remaining_invalid) and (
+        if (invalid_response_errors or remaining_invalid) and (
             not isinstance(yahoo_payload, dict) or yahoo_payload.get("error")
         ):
             raise ValueError("candidate failure conflicts with source health")
         for ticker in candidate_refetch:
-            if ticker not in provider_errors and ticker not in remaining_invalid:
+            if ticker not in invalid_response_errors and ticker not in remaining_invalid:
                 continue
             issue = _candidate_volatility_issue(
                 epoch_id=state.epoch_id,
@@ -2713,7 +2717,7 @@ def run_candidate_volatility_validation(
                 price_cache=state.first_engine._price_cache,
                 signal_identity_scope=state.issue_identity_scope,
                 cohorts=state.owner.cohorts,
-                reason_code="provider_error" if ticker in provider_errors else None,
+                reason_code="invalid_data" if ticker in invalid_response_errors else None,
             )
             state.owner._metric_store.save_candidate_input_issue(issue)
             state.candidate_issue_references.append(issue.reference())

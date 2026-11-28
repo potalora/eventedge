@@ -24,7 +24,6 @@ from tradingagents.strategies.orchestration.source_inputs import (
     configuration_fingerprint,
     successful_source,
 )
-from tradingagents.strategies.orchestration.source_reliability import build_source_reliability
 
 
 @pytest.fixture(autouse=True)
@@ -161,11 +160,6 @@ def test_usda_timeout_propagates_coverage_without_spurious_provider_error(tmp_pa
     assert incidents["open_incidents"][0]["provider"] == "usda"
     assert incidents["open_incidents"][0]["status"] == "degraded"
     assert incidents["open_incidents"][0]["reason_code"] == "timeout"
-
-    reliability = build_source_reliability(report, {"version": "source_reliability_catalog_v1", "cases": []})
-    assert [(row["source"], row["operation"], row["reason_code"]) for row in reliability["patterns"]] == [
-        ("usda", "crop_condition", "timeout")
-    ]
 
 
 def test_usda_semantic_invalid_response_after_http_200_stays_repair_required(tmp_path, monkeypatch):

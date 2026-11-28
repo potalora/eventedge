@@ -267,21 +267,9 @@ class SessionExecutor:
         self.policy_enabled = size_profile is not None and isinstance(
             policy_settings, dict
         )
-        effective_policy_settings = policy_settings
-        if (
-            self.policy_enabled
-            and "congressional_exposure_pct"
-            in getattr(PortfolioPolicyConfig, "__dataclass_fields__", {})
-            and "congressional_exposure_by_size" not in policy_settings
-            and hasattr(size_profile, "name")
-        ):
-            effective_policy_settings = {
-                **policy_settings,
-                "congressional_exposure_by_size": {size_profile.name: 0.0},
-            }
         self.portfolio_policy_config = (
             PortfolioPolicyConfig.from_size_profile(
-                size_profile, effective_policy_settings
+                size_profile, policy_settings
             )
             if self.policy_enabled
             else None

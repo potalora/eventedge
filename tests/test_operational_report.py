@@ -337,7 +337,11 @@ def test_completed_staging_with_candidate_quarantine_reconciles_durable_issues(n
 
 @pytest.mark.parametrize('damage', [None, 'missing', 'stale', 'cash', 'clean_unproved'])
 def test_isolated_short_history_report_retains_valid_staging(native_evidence, damage):
-    from tradingagents.strategies.orchestration.candidate_inputs import CandidateInputIssue
+    from tradingagents.strategies.orchestration.candidate_inputs import (
+        CandidateInputIssue,
+        candidate_acceptance_payload,
+        containment_key,
+    )
     repo, state, wire = native_evidence
     issue = CandidateInputIssue.create(issue_id='candidate_input_issue_'+'d'*32,
         epoch_id=EPOCH, session=date.fromisoformat(SESSION), dependency_kind='volatility_history',
@@ -348,6 +352,7 @@ def test_isolated_short_history_report_retains_valid_staging(native_evidence, da
         observed_sessions=(date(2026,10,5),), retryable=False,
         affected_signal_identities=({'event_key':'ui-event','strategy':'earnings_call'},), affected_cohorts=COHORTS)
     ref = dict(issue.reference()); ref['affected_cohorts'] = list(issue.affected_cohorts)
+    acceptances = {}
     with sqlite3.connect(state / GENERATION_DB_FILENAME) as connection:
         if damage != 'missing':
             payload = json.loads(issue.canonical_payload())
@@ -356,6 +361,14 @@ def test_isolated_short_history_report_retains_valid_staging(native_evidence, da
             _insert(connection, 'candidate_input_issues', issue_id=issue.issue_id, epoch_id=EPOCH,
                 session=SESSION, dependency_kind=issue.dependency_kind, ticker=issue.ticker,
                 payload_json=json.dumps(payload, sort_keys=True, separators=(',', ':')))
+            if damage != 'clean_unproved':
+                for cohort_name in COHORTS:
+                    proof_json = candidate_acceptance_payload(connection, issue, cohort_name)
+                    connection.execute(
+                        "INSERT OR REPLACE INTO schema_metadata(metadata_key, metadata_value) VALUES (?, ?)",
+                        (containment_key(issue, cohort_name), proof_json),
+                    )
+                    acceptances[cohort_name] = json.loads(proof_json)
         if damage == 'cash':
             connection.execute("UPDATE account_snapshots SET valid=0, invalid_reason='accounting failure'")
     path = next((state/'source_inputs/staging_volatility').glob('*.json'))
@@ -363,8 +376,10 @@ def test_isolated_short_history_report_retains_valid_staging(native_evidence, da
     envelope['payload']['quarantined_tickers'] = ('UI',)
     envelope['digest'] = hashlib.sha256(SourceInputStore.encode(envelope['payload']).encode()).hexdigest()
     path.write_text(SourceInputStore.encode(envelope))
-    for row in wire.values():
+    for cohort_name, row in wire.items():
         row.update(degraded=damage != 'clean_unproved', staging_valid=True, candidate_input_issues=[ref])
+        if cohort_name in acceptances:
+            row['candidate_input_acceptance'] = acceptances[cohort_name]
     _attempt(repo, wire, outcome='clean' if damage == 'clean_unproved' else 'degraded')
     report = _report(repo)
     if damage is None:

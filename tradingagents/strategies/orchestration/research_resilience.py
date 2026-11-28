@@ -235,23 +235,9 @@ def _project_capabilities(payload, provider, *, codec_limits=None):
             'optional_macro': ['BAMLC0A4CBBB', 'UNRATE', 'PAYEMS', 'ICSA']}
         for name, ids in compartments.items():
             outcome(name, set(ids) <= accepted, {sid: payload.get(sid) for sid in ids})
-        # Existing state validator is authoritative for the whole compartment;
-        # registry/security/clock checks still run in engine state_policy_scope.
-        state_keys = ('state_unemployment', 'state_exposure_registry', 'state_policy_settings', 'coverage', 'state_evidence_error')
-        state_ok = False
-        if payload.get('state_unemployment') is None and any(key in payload for key in state_keys[1:]):
+        if any(key in payload for key in ('coverage', 'state_unemployment', 'state_exposure_registry', 'state_policy_settings', 'state_evidence_error')):
             raise ValueError('invalid_source_capability_state_coverage')
-        if payload.get('state_unemployment') is not None:
-            from tradingagents.strategies.data_sources.state_economics_policy import validate_snapshot
-            coverage = validate_snapshot(payload['state_unemployment'])
-            if payload.get('coverage') != {'state_unemployment': coverage}:
-                raise ValueError('invalid_source_capability_state_coverage')
-            state_ok = coverage['complete'] and not payload.get('state_evidence_error')
-            if state_ok:
-                selected.update({key: payload[key] for key in state_keys if key in payload})
-        outcome('state_unemployment', state_ok, {key: payload.get(key) for key in state_keys},
-            reason='state_capability_not_enabled' if payload.get('state_unemployment') is None else 'unavailable_capability')
-        complete = len(accepted) == 9 and (payload.get('state_unemployment') is None or state_ok) and not payload.get('error')
+        complete = len(accepted) == 9 and not payload.get('error')
         outcome('complete', complete, payload)
         if selected:
             if payload.get('vintage') != {'as_of': manifest['vintage_date'], 'realtime_start': manifest['vintage_date'], 'realtime_end': manifest['vintage_date']}:
@@ -279,7 +265,7 @@ def strategy_capability_holds(scope, strategy_name, data_sources):
         return []
     required = []
     if 'fred' in data_sources:
-        required.append('fred.' + {'commodity_macro': 'commodity_macro', 'state_economics': 'state_unemployment'}.get(strategy_name, 'complete'))
+        required.append('fred.' + {'commodity_macro': 'commodity_macro'}.get(strategy_name, 'complete'))
     if 'yfinance' in data_sources:
         required.append('yfinance.research_prices')
     return [name for name in required if scope.get('capabilities', {}).get(name, {}).get('status') != 'usable']
@@ -344,7 +330,6 @@ def project_sources(data: dict, sources, *, codec_limits=None, capability_policy
             research_coverage_complete=receipt['research_coverage_complete'] and capability_complete)
         receipt['strategy_holds'] = {
             'commodity_macro': strategy_capability_holds(receipt, 'commodity_macro', ['fred']),
-            'state_economics': strategy_capability_holds(receipt, 'state_economics', ['fred']),
             'fred.other': strategy_capability_holds(receipt, 'other', ['fred']),
             'yfinance.consumers': strategy_capability_holds(receipt, 'other', ['yfinance'])}
     return projected, receipt
