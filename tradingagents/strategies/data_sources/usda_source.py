@@ -172,9 +172,6 @@ class USDASource:
     def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("USDA_NASS_API_KEY", "")
         self._cache: dict[str, list[dict]] = {}
-        # Short-circuit further calls in this run after the first hard failure.
-        # USDA NASS is occasionally unresponsive for hours and stalls the pipeline.
-        self._unavailable = False
 
     def fetch(self, params: dict[str, Any]) -> dict[str, Any]:
         method = params.get("method", "crop_progress")

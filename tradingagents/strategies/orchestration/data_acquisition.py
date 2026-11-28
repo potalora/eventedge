@@ -1019,17 +1019,81 @@ class DataAcquisitionService:
         self, trading_date: str, vintage_as_of: str | None = None
     ) -> dict[str, Any]:
         """Fetch USDA crop progress observations."""
-        from tradingagents.strategies.data_sources.usda_source import condition_scope
+        from tradingagents.strategies.data_sources import usda_source as usda_module
 
         source = self.registry.get("usda")
         if source is None:
             return {}
+        scopes = {
+            commodity: usda_module.condition_scope(commodity, trading_date)
+            for commodity in ("CORN", "SOYBEANS", "WHEAT")
+        }
+        active_commodities = [
+            commodity for commodity, scope in scopes.items() if scope["active_classes"]
+        ]
         crop_progress: dict[str, Any] = {}
         failures: list[str] = []
+        failure_details: list[tuple[str, int | None, int]] = []
         crop_coverage: dict[str, Any] = {}
-        for commodity in ("CORN", "SOYBEANS", "WHEAT"):
-            scope = condition_scope(commodity, trading_date)
+
+        if not active_commodities:
+            try:
+                usda_module.require_current_vintage(
+                    trading_date,
+                    vintage_as_of,
+                    today=usda_module.current_session_date(),
+                )
+                if callable(getattr(source, "is_available", None)) and not source.is_available():
+                    raise SourceFetchError("USDA access missing", reason_code="provider_error")
+            except Exception as exc:
+                err = source_fetch_error("USDA crop acquisition incomplete", exc)
+                return {
+                    "crop_progress": {},
+                    "coverage": {
+                        "complete": False,
+                        "crops": {
+                            commodity: {**scope, "complete": False}
+                            for commodity, scope in scopes.items()
+                        },
+                    },
+                    "error": str(err),
+                    "_coverage": {
+                        "status": "unavailable",
+                        "reason_code": err.reason_code,
+                        "http_status": err.http_status,
+                        "attempts": err.attempts,
+                    },
+                }
+
+        for commodity, scope in scopes.items():
             year = scope["reporting_year"]
+            if not scope["active_classes"]:
+                crop_progress[commodity] = []
+                crop_coverage[commodity] = {
+                    **scope,
+                    "classes": {
+                        crop_class: {
+                            "required_states": list(required),
+                            "active": False,
+                            "latest_by_state": {state: None for state in required},
+                            "missing_states": sorted(required),
+                            "stale_states": [],
+                            "missing_latest_states": [],
+                            "observation_date": None,
+                            "complete": True,
+                            "inactive_reason": "outside_declared_comparison_season",
+                        }
+                        for crop_class, required in scope["class_states"].items()
+                    },
+                    "complete": True,
+                    "off_season_skipped": True,
+                    "requested_states": sorted(
+                        {state for values in scope["class_states"].values() for state in values}
+                    ),
+                    "scope_mode": "declared_survey",
+                    "requested_reporting_year": year,
+                }
+                continue
             try:
                 options = {"vintage_as_of": vintage_as_of} if vintage_as_of is not None else {}
                 observations = source.fetch_crop_progress(
@@ -1043,6 +1107,7 @@ class DataAcquisitionService:
                 )
                 if crop_coverage[commodity].get("complete") is not True:
                     failures.append(f"{commodity}: incomplete declared survey coverage")
+                    failure_details.append(("invalid_response", None, 0))
             except Exception as exc:
                 err = source_fetch_error("USDA crop acquisition incomplete", exc)
                 crop_progress.update(err.partial_data.get("crop_progress", {}))
@@ -1050,6 +1115,7 @@ class DataAcquisitionService:
                     "coverage", {**scope, "complete": False}
                 )
                 failures.append(f"{commodity}: {err}")
+                failure_details.append((err.reason_code, err.http_status, err.attempts))
         acq_times = [
             str(row["available_at"])
             for weeks in crop_progress.values()
@@ -1067,8 +1133,30 @@ class DataAcquisitionService:
         if acq_times:
             acquired = max(acq_times)
             result.update(available_at=acquired, acquired_at=acquired)
+        if not active_commodities and not failures:
+            result["off_season_skipped"] = True
+            result["_coverage"] = {
+                "status": "ok",
+                "reason": "outside_declared_comparison_season",
+            }
         if failures:
             result["error"] = "; ".join(failures)
+            reason_code, http_status, _ = max(
+                failure_details,
+                key=lambda item: (
+                    item[0] == "invalid_response"
+                    or item[1] in {400, 401, 403, 404, 410},
+                    item[0],
+                    item[1] or 0,
+                ),
+                default=("provider_error", None, 0),
+            )
+            result["_coverage"] = {
+                "status": "partial" if any(crop_progress.values()) else "unavailable",
+                "reason_code": reason_code,
+                "http_status": http_status,
+                "attempts": max((item[2] for item in failure_details), default=0),
+            }
         return result
 
     def fetch_drought_data(

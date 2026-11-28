@@ -751,6 +751,7 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
             if source == 'usaspending' and award_recipient_mismatch:
                 result['unresolved'].append({'provider':source,'source':source,
                     'reason_code':'recipient_fallback_diagnostics_mismatch','http_status':None})
+            source_unresolved = []
             for event_index, event in enumerate(payload.get('_request_diagnostics',[])):
                 if not isinstance(event,dict) or not all(_safe_id(event.get(key)) for key in ('provider','operation')) or event.get('reason_code') is not None and not _safe_id(event['reason_code']) or type(event.get('recovered')) is not bool or type(event.get('attempts')) is not int or not 0<=event['attempts']<=5:
                     raise ValueError('source diagnostics invalid')
@@ -772,6 +773,7 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
                     result['recovered'].append(safe)
                 elif safe['reason_code']!='success':
                     result['unresolved'].append(safe)
+                    source_unresolved.append(safe)
             if source == 'edgar' and bulk_scope is not None:
                 # Exact validated declaration+sentinel only; arbitrary SEC errors
                 # and focused-litigation identity failures remain failures.
@@ -780,8 +782,18 @@ def _sources(state: Path, generation: str, session: str, commit: str, diagnose, 
             if payload.get('error') not in (None,'') or coverage_status in {'partial','failed'}:
                 if coverage_status in {'success','success_empty','complete'}:
                     diagnose('source_coverage_invalid',source)
-                result['unresolved'].append({'provider':source,'reason_code':coverage.get('reason_code','provider_error') if isinstance(coverage,dict) and _safe_id(coverage.get('reason_code','provider_error')) else 'provider_error',
-                                             'http_status':coverage.get('http_status') if isinstance(coverage,dict) and type(coverage.get('http_status')) is int else None})
+                typed_reason = coverage.get('reason_code') if isinstance(coverage,dict) and _safe_id(coverage.get('reason_code')) else None
+                summary_reason = typed_reason or 'provider_error'
+                summary_status = coverage.get('http_status') if isinstance(coverage,dict) and type(coverage.get('http_status')) is int else None
+                already_recorded = typed_reason is not None and any(
+                    row.get('source') == source
+                    and row.get('provider') == source
+                    and row.get('reason_code') == summary_reason
+                    and row.get('http_status') == summary_status
+                    for row in source_unresolved
+                )
+                if not already_recorded:
+                    result['unresolved'].append({'provider':source,'reason_code':summary_reason,'http_status':summary_status})
         for kind in ('recovered','unresolved'):
             result[kind] = sorted({json.dumps(row,sort_keys=True):row for row in result[kind]}.values(),key=lambda row:json.dumps(row,sort_keys=True))
         # Bind observational learning only after the accepted-source projection
