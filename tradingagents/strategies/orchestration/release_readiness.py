@@ -34,21 +34,6 @@ from tradingagents.strategies.orchestration.trading_calendar import (
     is_session,
     previous_session,
 )
-
-CONFIG_NAME = "generation-config-congress-retired.json"
-
-
-def generation_for_session(row, session):
-    return row
-
-
-def validate_generation_retirement(row, *, repo=None):
-    return None
-
-
-def execution_boundary(row):
-    return ""
-
 from tradingagents.strategies.orchestration._io import (
     CANONICAL_COHORTS,
     open_sqlite,
@@ -395,7 +380,6 @@ def _assess_generation(
     if len(generations) != 1:
         raise ValueError("generation identity is missing or ambiguous")
     generation = generations[0]
-    amendment = validate_generation_retirement(generation, repo=repo)
     if generation.get("status") != "active":
         raise ValueError("candidate generation is not active")
     if generation.get("git_commit") != expected_commit:
@@ -425,17 +409,8 @@ def _assess_generation(
     revision_epochs = {}
     for session_date in reversed(dates):
         session = session_date.isoformat()
-        selected = generation_for_session(generation, session)
-        session_commit = selected['git_commit']
+        session_commit = generation['git_commit']
         session_profile = operating_profile
-        if amendment is not None:
-            from .operating_contract import configured, profile_contract
-            from .runtime_recovery import identity_for
-
-            identity_for(repo, generation, session)
-            _, frozen, digest = read_generation_config(
-                snapshot / Path(selected['config_file']).name, selected['config_sha256'])
-            session_profile = profile_contract(frozen, profile_sha256=digest) if configured(frozen) else None
         daily = history.get(session, [])
         run = daily[0] if len(daily) == 1 else None
         manifest_clean = bool(
@@ -447,7 +422,7 @@ def _assess_generation(
             and not run.get("candidate_bar_quarantines")
         )
         epoch_id = _session_epoch(snapshot, session, generation_id, session_commit)
-        revision = (session_commit, selected.get('config_sha256'))
+        revision = (session_commit, generation.get('config_sha256'))
         revision_epochs.setdefault(revision, set()).add(epoch_id)
         if epoch_id is None:
             accounting = staging = candidates = health = False
@@ -493,10 +468,6 @@ def _assess_generation(
         rows.append(row)
     identity_complete = (operating_profile is None or
         all(None not in epochs and len(epochs) == 1 for epochs in revision_epochs.values()))
-    if amendment is not None and through.isoformat() < amendment['effective_session']:
-        # Earlier continuity does not qualify code that has not run its first
-        # amended session. Each declared revision still has one exact epoch.
-        identity_complete = False
     return {
         "generation_id": generation_id,
         "expected_commit": expected_commit,
@@ -539,14 +510,6 @@ def _session_epoch(
 def _verify_worktree(
     repo: Path, generation_id: str, generation: dict, commit: str
 ) -> None:
-    binding = validate_generation_retirement(generation, repo=repo)
-    if binding is not None:
-        from .runtime_recovery import identity_for
-
-        identity = identity_for(repo, generation, execution_boundary(generation))
-        if identity['generation_commit'] != commit:
-            raise ValueError('candidate worktree commit differs from expected commit')
-        return
     worktree = (repo / ".worktrees" / generation_id).resolve()
     if Path(generation.get("worktree_path", "")).resolve() != worktree:
         raise ValueError("candidate worktree path is not canonical")
@@ -633,7 +596,6 @@ def assess_generation(
     paths = [
         manifest,
         state / FROZEN_CONFIG_NAME,
-        state / CONFIG_NAME,
         *(
             Path(str(db) + suffix)
             for db in databases
@@ -667,13 +629,10 @@ def assess_generation(
                         if source.is_symlink() or any(path.is_symlink() for path in source.rglob('*')):
                             raise ValueError('immutable readiness evidence contains a symlink')
                         shutil.copytree(source, snapshot / name, symlinks=False)
-                for name in (FROZEN_CONFIG_NAME, CONFIG_NAME):
-                    frozen_config = state / name
-                    if frozen_config.exists():
-                        # Historical and amended receipts bind distinct exact
-                        # files; fingerprint and snapshot both revisions.
-                        body, _, _ = read_generation_config(frozen_config)
-                        (snapshot / name).write_bytes(body)
+                frozen_config = state / FROZEN_CONFIG_NAME
+                if frozen_config.exists():
+                    body, _, _ = read_generation_config(frozen_config)
+                    (snapshot / FROZEN_CONFIG_NAME).write_bytes(body)
                 if before != _fingerprint(paths):
                     raise ValueError("state changed during readiness assessment")
                 result = _assess_generation(

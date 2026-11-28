@@ -290,7 +290,13 @@ def test_mixed_short_history_and_genuine_fault_fails_closed(tmp_path, monkeypatc
             orchestrator._epoch_id, STAGE_SESSION
         )
         by_ticker = {issue.ticker: issue.reason_code for issue in issues}
-        expected_fault_reason = "missing_data" if fault == "mid_series_gap" else fault
+        expected_fault_reason = (
+            "missing_data"
+            if fault == "mid_series_gap"
+            else "invalid_data"
+            if fault == "provider_error"
+            else fault
+        )
         assert by_ticker == {"UI": "insufficient_history", "ZKH": expected_fault_reason}
         assert len(results) == 16
         assert all(

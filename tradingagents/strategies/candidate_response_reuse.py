@@ -93,6 +93,12 @@ def _client_namespace(memo: _Memo, client) -> int | None:
 
 
 def _native_client_namespace(memo: _Memo, client) -> int | None:
+    from .llm_utils import GeminiClient
+    if isinstance(client, GeminiClient):
+        settings = ("gemini", client.base_url, client.api_key)
+        if any(not isinstance(value, str) for value in settings[1:]):
+            return None
+        return _settings_namespace(memo, settings)
     native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
     provider = "openai" if "openai" in native_bases else "anthropic" if "anthropic" in native_bases else None
     if provider is None:
@@ -126,10 +132,15 @@ def reused_candidate_response(client, *, model: str, system: str, prompt: str,
         namespace = _client_namespace(request.memo, client)
         if namespace is None:
             return None
-        from .llm_utils import uses_responses
-        # Keep requested and effective limits, even when Responses raises the cap.
+        from .llm_utils import GEMINI_DEFAULT_MAX_OUTPUT_TOKENS, is_gemini_model, uses_responses
+        # Keep requested and effective limits, even when thinking/Responses raises the cap.
         from .chatgpt_plan_client import ChatGPTPlanClient
-        effective_limit = None if isinstance(client, ChatGPTPlanClient) else max(16384, max_tokens) if uses_responses(model) else max_tokens
+        effective_limit = (
+            None if isinstance(client, ChatGPTPlanClient)
+            else max(GEMINI_DEFAULT_MAX_OUTPUT_TOKENS, max_tokens) if is_gemini_model(model)
+            else max(16384, max_tokens) if uses_responses(model)
+            else max_tokens
+        )
         key = ("validated-candidate-response-v1", namespace, request.context,
                model, role, effort, max_tokens, effective_limit, temperature, system, prompt)
         hash(key)  # Unsupported mutable request values cannot authorize reuse.

@@ -20,9 +20,40 @@ from tradingagents.strategies.state.generation_db import GENERATION_DB_FILENAME
 @pytest.fixture
 def evidence(native_evidence, request):
     repo, state, wire = native_evidence
-    profile = {'autoresearch': {'research_resilience_policy': 'dependency_isolation_v1',
-        'llm_billing_mode': 'chatgpt_plan'}}
-    filing_exclusion = getattr(request, 'param', None) == 'filing_exclusion'
+    param = getattr(request, 'param', None)
+    if param == 'gemini4':
+        profile = {'autoresearch': {
+            'research_resilience_policy': 'dependency_isolation_v1',
+            'llm_billing_mode': 'api',
+            'bounded_model': 'gemini-4-hydrogen',
+            'autoresearch_model': 'gemini-4-hydrogen',
+            'bounded_effort': 'high',
+            'llm_effort': 'high',
+            'thesis_model': 'gemini-4-neon',
+            'thesis_effort': 'high',
+            'paper_trade': {
+                'portfolio_committee_enabled': True,
+                'portfolio_committee_model': 'gemini-4-neon',
+                'portfolio_committee_effort': 'high',
+            },
+        }}
+    else:
+        profile = {'autoresearch': {
+            'research_resilience_policy': 'dependency_isolation_v1',
+            'llm_billing_mode': 'chatgpt_plan',
+            'bounded_model': 'gpt-6-luna',
+            'autoresearch_model': 'gpt-6-luna',
+            'bounded_effort': 'high',
+            'llm_effort': 'high',
+            'thesis_model': 'gpt-6.2-sol',
+            'thesis_effort': 'high',
+            'paper_trade': {
+                'portfolio_committee_enabled': True,
+                'portfolio_committee_model': 'gpt-6.2-sol',
+                'portfolio_committee_effort': 'high',
+            },
+        }}
+    filing_exclusion = param == 'filing_exclusion'
     if filing_exclusion:
         profile['autoresearch']['filing_research_policy']='disabled_v1'
     from tradingagents.default_config import DEFAULT_CONFIG
@@ -318,3 +349,112 @@ def test_collector_does_not_modify_retained_files(evidence):
 def test_health_dependency_scope_must_match_configured_strategy(evidence):
     _rewrite_health(evidence,lambda health:health['evidence'].update(data_sources=['invented_source']))
     assert not collect(evidence)['qualifies']
+
+
+@pytest.mark.parametrize('evidence', ['gemini4'], indirect=True)
+@pytest.mark.parametrize('returned_model', ['gemini-4-neon', 'gemini-4-neon-001'])
+def test_gemini4_api_evidence_accepts_alias_and_pinned_snapshot(evidence, returned_model):
+    from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
+    repo, state, wire, sha, _, _, _ = evidence
+    bounded_outcome = {
+        'version': 'research-model-outcome-v1',
+        'model_request': request_receipt(
+            model='gemini-4-hydrogen', role='bounded', effort='high',
+            max_tokens=4096, temperature=0.0, system='system', prompt='prompt',
+        ),
+        'response_received': True,
+        'response_sha256': 'e' * 64,
+        'response_bytes': 100,
+        'response_encoding': 'utf-8',
+        'analysis_status': 'validated',
+        'analysis_failure_reason': None,
+        'model_provenance': {
+            'configured_model': 'gemini-4-hydrogen',
+            'returned_model': 'gemini-4-hydrogen',
+            'reasoning_effort': 'high',
+            'billing_mode': 'api',
+            'effective_output_limit': 65535,
+            'response_id': 'resp_h',
+        },
+    }
+    status = {
+        'mode': 'model',
+        'status': 'selected',
+        'degraded': False,
+        'reason': '',
+        'eligible_count': 1,
+        'input_count': 1,
+        'selected_count': 1,
+        'model_request': request_receipt(
+            model='gemini-4-neon', role='committee', effort='high',
+            max_tokens=8192, temperature=0.0, system='system', prompt='prompt',
+        ),
+        'model_provenance': {
+            'configured_model': 'gemini-4-neon',
+            'returned_model': returned_model,
+            'reasoning_effort': 'high',
+            'billing_mode': 'api',
+            'effective_output_limit': 65535,
+            'response_id': 'resp_n',
+        },
+    }
+    wire[COHORTS[0]]['committee_decision_status'] = status
+    with sqlite3.connect(state / GENERATION_DB_FILENAME) as db:
+        db.execute(
+            'UPDATE committee_decisions SET payload_json=? WHERE cohort_id=?',
+            (json.dumps({'status': status, 'recommendations': [], 'policy_decisions': []}), COHORTS[0]),
+        )
+    _rewrite_screen(
+        evidence,
+        lambda payload: payload['horizons']['30d']['signals'].append(
+            {'strategy': 'earnings_call', 'metadata': {'analysis_status': 'validated', 'research_model_outcome': bounded_outcome}}
+        ),
+    )
+    result = collect(evidence)
+    assert result['qualifies'], result
+    assert result['native_models'] == ['gemini-4-hydrogen', 'gemini-4-neon']
+
+
+@pytest.mark.parametrize('evidence', ['gemini4'], indirect=True)
+@pytest.mark.parametrize('kind', ['wrong_billing', 'wrong_returned_prefix', 'wrong_model'])
+def test_gemini4_api_evidence_rejects_mismatched_billing_or_model(evidence, kind):
+    from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
+    provenance = {
+        'configured_model': 'gemini-4-hydrogen',
+        'returned_model': 'gemini-4-hydrogen',
+        'reasoning_effort': 'high',
+        'billing_mode': 'api',
+        'effective_output_limit': 65535,
+        'response_id': 'resp_1',
+    }
+    req_model = 'gemini-4-hydrogen'
+    if kind == 'wrong_billing':
+        provenance['billing_mode'] = 'chatgpt_plan'
+    elif kind == 'wrong_returned_prefix':
+        provenance['returned_model'] = 'gemini-4-hydrogen_evil'
+    else:
+        provenance['configured_model'] = 'gpt-6-luna'
+        provenance['returned_model'] = 'gpt-6-luna'
+        req_model = 'gpt-6-luna'
+    outcome = {
+        'version': 'research-model-outcome-v1',
+        'model_request': request_receipt(
+            model=req_model, role='bounded', effort='high',
+            max_tokens=4096, temperature=0.0, system='system', prompt='prompt',
+        ),
+        'response_received': True,
+        'response_sha256': 'e' * 64,
+        'response_bytes': 100,
+        'response_encoding': 'utf-8',
+        'analysis_status': 'validated',
+        'analysis_failure_reason': None,
+        'model_provenance': provenance,
+    }
+    _rewrite_screen(
+        evidence,
+        lambda payload: payload['horizons']['30d']['signals'].append(
+            {'strategy': 'earnings_call', 'metadata': {'analysis_status': 'validated', 'research_model_outcome': outcome}}
+        ),
+    )
+    result = collect(evidence)
+    assert not result['qualifies'] and result['checks']['model_outcomes'] is False

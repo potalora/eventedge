@@ -762,7 +762,7 @@ def test_candidate_volatility_provider_exception_is_sanitized_into_issue(
             orchestrator._epoch_id, SESSION
         )
         assert [(issue.ticker, issue.reason_code) for issue in issues] == [
-            ("UI", "provider_error")
+            ("UI", "invalid_data")
         ]
         assert secret not in json.dumps(results, sort_keys=True, default=str)
         assert secret not in caplog.text
@@ -799,7 +799,7 @@ def test_candidate_provider_error_quarantines_even_after_valid_cache_mutation(
             orchestrator._epoch_id, SESSION
         )
         assert [(issue.ticker, issue.reason_code) for issue in issues] == [
-            ("UI", "provider_error")
+            ("UI", "invalid_data")
         ]
         assert all(
             observation == {"signals": (), "reference_bars": ()}

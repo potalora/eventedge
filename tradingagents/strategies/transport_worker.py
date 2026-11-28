@@ -145,6 +145,71 @@ def _execute_plan(payload):
                 "error_metadata": {"error_code": "provider_error"}}
 
 
+def _execute_gemini(payload):
+    """Run one Gemini :generateContent call over httpx inside the killable worker."""
+    import httpx
+    from tradingagents.strategies.llm_utils import (
+        GeminiClient,
+        GeminiTransportError,
+        _call_gemini_direct,
+    )
+
+    request = payload["request"]
+    if (
+        "regulation_graphics_model_policy" in request
+        or "max_call_seconds" in request
+        or "document_inputs" in request
+    ):
+        return {
+            "error": "provider_error",
+            "status_code": None,
+            "error_metadata": {"error_code": "invalid_request"},
+        }
+    timeout = payload["timeout"]
+    settings = payload["client"]
+    try:
+        client = GeminiClient(
+            api_key=settings["api_key"],
+            base_url=settings["base_url"],
+        )
+        httpx_timeout = httpx.Timeout(timeout, connect=min(10.0, timeout))
+        with httpx.Client(
+            timeout=httpx_timeout,
+            follow_redirects=False,
+            trust_env=False,
+        ) as http_client:
+            provenance = {}
+            text = _call_gemini_direct(
+                client,
+                **request,
+                provenance=provenance,
+                timeout=timeout,
+                http_client=http_client,
+            )
+            return {"text": text, "provenance": provenance}
+    except (TimeoutError, httpx.TimeoutException):
+        return {"error": "timeout", "status_code": None, "error_metadata": {}}
+    except GeminiTransportError as exc:
+        status = exc.status_code if isinstance(exc.status_code, int) else None
+        return {
+            "error": "provider_error",
+            "status_code": status,
+            "error_metadata": extract_error_metadata(exc),
+        }
+    except ValueError:
+        return {
+            "error": "provider_error",
+            "status_code": None,
+            "error_metadata": {"error_code": "invalid_request"},
+        }
+    except Exception:
+        return {
+            "error": "provider_error",
+            "status_code": None,
+            "error_metadata": {"error_code": "provider_error"},
+        }
+
+
 def execute(payload):
     if payload['kind'] == 'http_get_bytes':
         import base64
@@ -187,6 +252,8 @@ def execute(payload):
     if payload["kind"] == "model":
         if payload["provider"] == "chatgpt_plan":
             return _execute_plan(payload)
+        if payload["provider"] == "gemini":
+            return _execute_gemini(payload)
         if 'regulation_graphics_model_policy' in payload['request'] or 'max_call_seconds' in payload['request']:
             return {"error": "provider_error", "status_code": None,
                     "error_metadata": {"error_code": "invalid_request"}}
@@ -194,9 +261,12 @@ def execute(payload):
         if payload["provider"] == "openai":
             from openai import OpenAI
             constructor = OpenAI
-        else:
+        elif payload["provider"] == "anthropic":
             from anthropic import Anthropic
             constructor = Anthropic
+        else:
+            return {"error": "provider_error", "status_code": None,
+                    "error_metadata": {"error_code": "invalid_request"}}
         settings = payload["client"]
         try:
             with constructor(**settings, timeout=payload["timeout"], max_retries=0) as client:

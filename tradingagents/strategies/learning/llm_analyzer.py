@@ -1,7 +1,7 @@
-"""LLM-based signal analyzer for active gen_003 paper-trade strategies.
+"""LLM-based signal analyzer for active paper-trade strategies.
 
-Thesis analyzers (earnings_call, supply_chain) default to gpt-6.2-sol (high effort);
-bounded analyzers (commodity_macro, weather_ag) default to gpt-6-luna (high effort).
+Thesis analyzers (earnings_call, supply_chain) default to gemini-4-neon (high effort);
+bounded analyzers (commodity_macro, weather_ag) default to gemini-4-hydrogen (high effort).
 """
 from __future__ import annotations
 
@@ -85,13 +85,13 @@ class LLMAnalyzer:
     def __init__(self, config: dict | None = None) -> None:
         self.config = config or {}
         ar = self.config.get("autoresearch", {})
-        self._model_name = ar.get("bounded_model") or ar.get("autoresearch_model", "gpt-6-luna")
+        self._model_name = ar.get("bounded_model") or ar.get("autoresearch_model", "gemini-4-hydrogen")
         self._effort = ar.get("bounded_effort") or ar.get("llm_effort", "high")
         if ar:
-            self._thesis_model = ar.get("thesis_model", ar.get("autoresearch_model", "gpt-6.2-sol"))
+            self._thesis_model = ar.get("thesis_model", ar.get("autoresearch_model", "gemini-4-neon"))
             self._thesis_effort = ar.get("thesis_effort", ar.get("llm_effort", "high"))
         else:
-            self._thesis_model = "gpt-6.2-sol"
+            self._thesis_model = "gemini-4-neon"
             self._thesis_effort = "high"
         self.last_call_provenance: dict[str, Any] = {}
         self.last_call_failure = ""
@@ -108,7 +108,8 @@ class LLMAnalyzer:
             if client is None:
                 return None
             from tradingagents.strategies.chatgpt_plan_client import ChatGPTPlanClient
-            if isinstance(client, ChatGPTPlanClient):
+            from tradingagents.strategies.llm_utils import GeminiClient
+            if isinstance(client, (ChatGPTPlanClient, GeminiClient)):
                 return client
             native_bases = {base.__module__.split(".")[0] for base in type(client).__mro__}
             if native_bases & {"openai", "anthropic"}:
@@ -145,8 +146,12 @@ class LLMAnalyzer:
                 self._client = plan_client
                 return self._client
             try:
-                from tradingagents.strategies.llm_utils import uses_responses
-                if uses_responses(self._model_name):
+                from tradingagents.strategies.llm_utils import GeminiClient, model_provider
+                provider = model_provider(self._model_name)
+                if provider == "gemini":
+                    self._client = GeminiClient.from_env()
+                    return self._client
+                if provider == "openai":
                     from openai import OpenAI
                     self._client = OpenAI(
                         timeout=httpx.Timeout(120.0, connect=10.0), max_retries=0,
@@ -190,7 +195,7 @@ class LLMAnalyzer:
             configured_plan_client,
             require_configured_billing,
         )
-        from tradingagents.strategies.llm_utils import call_analysis_model, uses_responses
+        from tradingagents.strategies.llm_utils import GeminiClient, call_analysis_model, model_provider
         from tradingagents.strategies.orchestration.research_model_attempt import request_receipt
         from tradingagents.strategies.orchestration.research_resilience import (
             configured as resilience_configured,
@@ -234,13 +239,15 @@ class LLMAnalyzer:
         try:
             model_timeout()
             plan_client = configured_plan_client(self.config, model)
-            mixed_provider = uses_responses(model) != uses_responses(self._model_name)
+            provider = model_provider(model)
+            mixed_provider = provider != model_provider(self._model_name)
             if plan_client is not None and mixed_provider:
                 client = self._provider_clients.setdefault("chatgpt_plan", plan_client)
             elif mixed_provider:
-                provider = "openai" if uses_responses(model) else "anthropic"
                 if provider not in self._provider_clients:
-                    if provider == "openai":
+                    if provider == "gemini":
+                        self._provider_clients[provider] = GeminiClient.from_env()
+                    elif provider == "openai":
                         from openai import OpenAI
                         self._provider_clients[provider] = OpenAI(timeout=120, max_retries=0)
                     else:
@@ -301,7 +308,7 @@ class LLMAnalyzer:
             return ""
 
     # ------------------------------------------------------------------
-    # Earnings call analysis (thesis: gpt-6.2-sol high)
+    # Earnings call analysis (thesis: gemini-4-neon high)
     # ------------------------------------------------------------------
 
     def analyze_earnings_call(
@@ -345,7 +352,7 @@ Keep ALL string values under 100 characters."""
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
-    # Supply chain analysis (thesis: gpt-6.2-sol high)
+    # Supply chain analysis (thesis: gemini-4-neon high)
     # ------------------------------------------------------------------
 
     def analyze_supply_chain(
@@ -372,7 +379,7 @@ Keep ALL string values under 100 characters."""
         return _parse_json_response(result) if result else {}
 
     # ------------------------------------------------------------------
-    # Commodity macro & ag weather analysis (bounded: gpt-6-luna high)
+    # Commodity macro & ag weather analysis (bounded: gemini-4-hydrogen high)
     # ------------------------------------------------------------------
 
     def analyze_commodity_macro(

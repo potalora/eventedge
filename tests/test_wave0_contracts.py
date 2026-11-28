@@ -46,17 +46,17 @@ from tradingagents.strategies.state.generation_db import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GEN003_PROFILE = REPO_ROOT / "config" / "profiles" / "gen003-clean.json"
+GEMINI4_PROFILE = REPO_ROOT / "config" / "profiles" / "gemini4-clean.json"
 
 
 # ---------------------------------------------------------------------------
-# 1. GenerationConfig + gen003-clean.json + DEFAULT_CONFIG
+# 1. GenerationConfig + gemini4-clean.json + DEFAULT_CONFIG
 # ---------------------------------------------------------------------------
 
 
 class TestGenerationConfig:
-    def test_gen003_clean_profile_matches_exact_contract(self) -> None:
-        cfg = load_generation_config(GEN003_PROFILE)
+    def test_gemini4_clean_profile_matches_exact_contract(self) -> None:
+        cfg = load_generation_config(GEMINI4_PROFILE)
         assert cfg.enabled_strategies == (
             "earnings_call",
             "supply_chain",
@@ -64,14 +64,14 @@ class TestGenerationConfig:
             "weather_ag",
             "commodity_macro",
         )
-        assert cfg.llm_billing_mode == "chatgpt_plan"
-        assert cfg.thesis_model == "gpt-6.2-sol"
+        assert cfg.llm_billing_mode == "api"
+        assert cfg.thesis_model == "gemini-4-neon"
         assert cfg.thesis_effort == "high"
-        assert cfg.portfolio_committee_model == "gpt-6.2-sol"
+        assert cfg.portfolio_committee_model == "gemini-4-neon"
         assert cfg.portfolio_committee_effort == "high"
-        assert cfg.bounded_model == "gpt-6-luna"
+        assert cfg.bounded_model == "gemini-4-hydrogen"
         assert cfg.bounded_effort == "high"
-        assert cfg.chatgpt_plan_auth_path == "/opt/data/private/eventedge/credentials/plan-auth.json"
+        assert cfg.chatgpt_plan_auth_path is None
         assert cfg.blocked_tickers == ("GOOGL", "GOOG")
 
         pl = cfg.paper_ledger
@@ -109,7 +109,7 @@ class TestGenerationConfig:
         assert cfg == DEFAULT_GENERATION_CONFIG
 
     def test_roundtrip_canonical_json_and_sha256_pinning(self, tmp_path: Path) -> None:
-        cfg = load_generation_config(GEN003_PROFILE)
+        cfg = load_generation_config(GEMINI4_PROFILE)
         roundtripped = GenerationConfig.from_dict(cfg.to_dict())
         assert roundtripped == cfg
         assert roundtripped.canonical_json() == cfg.canonical_json()
@@ -117,18 +117,18 @@ class TestGenerationConfig:
         assert len(cfg.sha256()) == 64
 
         # Verify expected_sha256 and expected_file_sha256 checks
-        raw_sha = hashlib.sha256(GEN003_PROFILE.read_bytes()).hexdigest()
+        raw_sha = hashlib.sha256(GEMINI4_PROFILE.read_bytes()).hexdigest()
         loaded = load_generation_config(
-            GEN003_PROFILE,
+            GEMINI4_PROFILE,
             expected_sha256=cfg.sha256(),
             expected_file_sha256=raw_sha,
         )
         assert loaded == cfg
 
         with pytest.raises(ConfigValidationError, match="canonical sha256 mismatch"):
-            load_generation_config(GEN003_PROFILE, expected_sha256="0" * 64)
+            load_generation_config(GEMINI4_PROFILE, expected_sha256="0" * 64)
         with pytest.raises(ConfigValidationError, match="file sha256 mismatch"):
-            load_generation_config(GEN003_PROFILE, expected_file_sha256="f" * 64)
+            load_generation_config(GEMINI4_PROFILE, expected_file_sha256="f" * 64)
 
         # Compact file produces same canonical sha256 despite different file bytes
         compact = tmp_path / "compact.json"
@@ -224,6 +224,7 @@ class TestGenerationConfig:
             assert dead_key not in ar
         assert "decision_shadow" not in DEFAULT_CONFIG
         assert not (REPO_ROOT / "configs").exists()
+        assert not (REPO_ROOT / "config" / "profiles" / "gen003-clean.json").exists()
         for v in (1, 2, 3):
             assert not (REPO_ROOT / "config" / "profiles" / f"stabilization-v{v}.json").exists()
 

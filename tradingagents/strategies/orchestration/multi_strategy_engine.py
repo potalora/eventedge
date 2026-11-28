@@ -325,9 +325,6 @@ class MultiStrategyEngine:
         self._all_strategies = list(strategies or get_paper_trade_strategies())
         self.paper_trade_strategies = list(self._all_strategies)
 
-        from .source_lifecycle_policy import configured as lifecycle_configured
-        lifecycle_configured(self.ar_config, self._all_strategies)
-
         from .operating_contract import configured as profile_configured, configure_strategies
         if profile_configured(self.config) or self.ar_config.get("enabled_strategies") or self.ar_config.get("disabled_strategies"):
             self.paper_trade_strategies = configure_strategies(
@@ -1032,21 +1029,9 @@ class MultiStrategyEngine:
         policy_enabled = size_profile is not None and isinstance(
             policy_settings, dict
         )
-        effective_policy_settings = policy_settings
-        if (
-            policy_enabled
-            and "congressional_exposure_pct"
-            in getattr(PortfolioPolicyConfig, "__dataclass_fields__", {})
-            and "congressional_exposure_by_size" not in policy_settings
-            and hasattr(size_profile, "name")
-        ):
-            effective_policy_settings = {
-                **policy_settings,
-                "congressional_exposure_by_size": {size_profile.name: 0.0},
-            }
         policy_config = (
             PortfolioPolicyConfig.from_size_profile(
-                size_profile, effective_policy_settings
+                size_profile, policy_settings
             )
             if policy_enabled
             else None
@@ -1536,16 +1521,7 @@ class MultiStrategyEngine:
                 'candidate_receipts': {record.signal_id: signal['metadata']['research_admission'] for signal, record in timely},
                 'retained_origins': {record.signal_id: signal['metadata']['retained_from_signal_id']
                     for signal, record in timely if signal['metadata'].get('retained_from_signal_id')}}
-        committee_config = self.config
-        if effective_policy_settings is not policy_settings:
-            committee_config = {
-                **self.config,
-                "autoresearch": {
-                    **self.ar_config,
-                    "portfolio_policy": effective_policy_settings,
-                },
-            }
-        committee = PortfolioCommittee(committee_config, size_profile=size_profile)
+        committee = PortfolioCommittee(self.config, size_profile=size_profile)
         frozen_decision = self.ledger.committee_decision(session, epoch_id, policy_id)
         if frozen_decision is None:
             from .runtime_recovery import require_acquisition_allowed
@@ -2137,14 +2113,6 @@ class MultiStrategyEngine:
             acquisition_purpose=acquisition_purpose,
             fetcher_overrides=overrides,
         )
-        from .source_lifecycle_policy import declaration as lifecycle_declaration
-        data.update(
-            lifecycle_declaration(
-                ar_cfg,
-                self.__dict__.get("_all_strategies")
-                or self.__dict__.get("paper_trade_strategies", ()),
-            )
-        )
         return data
 
     def _fetch_finnhub_data(self, trading_date: str, max_workflow_budget_s: float | None = None) -> dict[str, Any]:
@@ -2241,110 +2209,23 @@ class MultiStrategyEngine:
             analyzer.last_call_provenance = {}
             analyzer.last_call_failure = ''
         analysis_type = c.metadata.get("analysis_type", "")
-        if analysis_type == 'bounded_document_research':
-            analyzer.last_bounded_document_attempt = None
         llm_result = {}
-        full_filing = c.metadata.get('full_filing_evidence_policy') == 'complete_submission_v1'
-        full_regulation = analysis_type == 'regulation' and (
-            self.ar_config.get('regulation_evidence_policy') is not None
-            or c.metadata.get('regulation_evidence_policy') is not None)
-        regulation_call_started = False
-        optional = analysis_type in {"insider_activity", "commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
+        optional = analysis_type in {"commodity_macro", "ag_weather"} and c.metadata.get("deterministic_evidence_complete") is True
 
         reuse_token = begin_candidate_response(strategy_name, analysis_type, c.metadata.get("discovery_id", ""), optional)
 
         try:
-            if not c.ticker and 'edgar' in self.ar_config.get('retired_sources', {}):
-                raise ValueError('invalid_retired_source_identity_dependency')
             model_timeout()
+            if c.metadata.get("full_filing_evidence_policy") is not None:
+                raise ValueError("unsupported_required_analysis:full_filing")
             required_text_fields = {
                 "earnings_call": ("analysis_text", "transcript_text"),
-                "filing_change": ("current_text",), "exec_comp": ("proxy_text",),
-                "material_event": ("current_text",), "activist_stake": ("current_text",),
-                "passive_stake": ("current_text",), "quantum_readiness": ("analysis_text",),
-                "supply_chain": ("headline", "summary"), "regulation": ("title", "summary"),
-                "litigation": ("case_name", "nature_of_suit", "cause"),
+                "supply_chain": ("headline", "summary"),
             }
             fields = required_text_fields.get(analysis_type)
-            if not full_filing and not full_regulation and fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
+            if fields and not any(isinstance(c.metadata.get(key), str) and c.metadata[key].strip() for key in fields):
                 raise ValueError("missing_source_text")
-            if analysis_type == 'bounded_document_research':
-                # Held until independent claim/context verification and scoped
-                # thesis validation. Ordinary committee/risk still own orders.
-                c.journal_only = True
-                decision_policy = self.ar_config.get('bounded_document_decision_policy')
-                decision_options = ({'decision_scope':c.metadata.get('bounded_document_decision_scope'),
-                                     'ticker':c.ticker} if decision_policy is not None else {})
-                scope = decision_options.get('decision_scope')
-                if isinstance(scope,dict) and 'independent_review' not in scope:
-                    decision_options['verification_clock'] = lambda:datetime.now(timezone.utc).isoformat()
-                llm_result = analyzer.analyze_bounded_document_evidence(
-                    c.metadata['bounded_document_evidence'], session_as_of=c.date,
-                    regime_context=regime_context, **decision_options)
-                if decision_policy is not None:
-                    eligibility = llm_result.get('decision_eligibility', {})
-                    from tradingagents.strategies.document_review_clock import POLICY as NEXT_OPEN_POLICY
-                    expected_authority = ('requires_final_decision_clock' if decision_policy == NEXT_OPEN_POLICY
-                        else 'ordinary_committee_and_risk_gates')
-                    if (decision_policy not in ('verified_scoped_claims_v1', NEXT_OPEN_POLICY)
-                            or eligibility.get('eligible') is not True
-                            or eligibility.get('policy') != decision_policy
-                            or eligibility.get('execution_authority') != expected_authority
-                            or llm_result.get('assessment_scope') != 'selected_pages'
-                            or llm_result.get('journal_only') is not (llm_result.get('direction') == 'neutral')):
-                        raise ValueError('invalid_bounded_document_eligibility')
-                    c.journal_only = llm_result['journal_only']
-                elif (llm_result.get('journal_only') is not True
-                        or llm_result.get('trading_authority') is not False
-                        or llm_result.get('assessment_scope') != 'selected_pages'):
-                    raise ValueError('invalid_bounded_document_authority')
-            elif full_filing:
-                from tradingagents.strategies.orchestration.filing_inputs import filing_analysis_inputs
-                filing_arguments = filing_analysis_inputs(c, filing_data, universe)
-                llm_result = analyzer.analyze_filing_evidence(
-                    analysis_type, regime_context=regime_context, **filing_arguments)
-                c.metadata['document_assessment'] = llm_result['document_assessment']
-                if llm_result['filing_evidence_status'] != 'sufficient':
-                    c.metadata['filing_assessment'] = llm_result
-                    raise ValueError('missing_required_filing_analysis')
-            elif full_regulation:
-                from tradingagents.strategies.orchestration.regulation_inputs import (
-                    regulation_analysis_inputs, validate_regulation_policy,
-                )
-                if self.ar_config.get('regulation_evidence_policy') not in (None, 'complete_document_text_v1'):
-                    raise ValueError('invalid_regulation_evidence_policy')
-                source_graph = (filing_data or {}).get('regulations', {}).get('regulation_evidence', {})
-                if (self.ar_config.get('regulation_retrieval_policy') is not None
-                        or self.ar_config.get('regulation_assessment_policy') is not None
-                        or source_graph.get('retrieval_policy') is not None):
-                    validate_regulation_policy(filing_data, self.ar_config)
-                regulation_arguments = regulation_analysis_inputs(c, filing_data, universe)
-                regulation_call_started = True
-                llm_result = analyzer.analyze_regulation_evidence(
-                    regime_context=regime_context, **regulation_arguments,
-                    **({'assessment_policy': self.ar_config['regulation_assessment_policy']}
-                       if self.ar_config.get('regulation_assessment_policy') is not None else {}))
-                c.metadata['document_assessment'] = llm_result['document_assessment']
-                c.metadata['regulation_evidence_status'] = llm_result['regulation_evidence_status']
-                abstained_reg = (
-                    isinstance(llm_result, dict)
-                    and llm_result.get('document_assessment') == 'assessed_no_directional_thesis'
-                )
-                if llm_result['regulation_evidence_status'] != 'sufficient' and not (
-                        self.ar_config.get('regulation_assessment_policy') == 'recorded_abstention_v1'
-                        and abstained_reg):
-                    c.metadata['regulation_assessment'] = llm_result
-                    provenance = getattr(analyzer, 'last_call_provenance', None)
-                    if isinstance(provenance, dict) and provenance:
-                        c.metadata['model_provenance'] = dict(provenance)
-                    raise ValueError('missing_required_regulation_analysis')
-            elif analysis_type == 'state_economics':
-                from tradingagents.strategies.data_sources.state_economics_policy import validate_assessment
-                event, exposure = c.metadata['state_event'], c.metadata['state_exposure']
-                llm_result = analyzer.analyze_state_economics(ticker=c.ticker, state_event=event,
-                    state_exposure=exposure, regime_context=regime_context)
-                llm_result = validate_assessment(llm_result, ticker=c.ticker, event=event, exposure=exposure)
-            elif analysis_type == "earnings_call":
+            if analysis_type == "earnings_call":
                 llm_result = analyzer.analyze_earnings_call(
                     c.metadata.get(
                         "analysis_text", c.metadata.get("transcript_text", "")
@@ -2352,13 +2233,6 @@ class MultiStrategyEngine:
                     c.ticker,
                     regime_context=regime_context,
                     text_source=c.metadata.get("text_source", "earnings_news"),
-                )
-            elif analysis_type == "regulation":
-                llm_result = analyzer.analyze_regulation(
-                    c.metadata.get("title", ""),
-                    c.metadata.get("summary", ""),
-                    c.metadata.get("agency_id", ""),
-                    regime_context=regime_context,
                 )
             elif analysis_type == "supply_chain":
                 llm_result = analyzer.analyze_supply_chain(
@@ -2368,63 +2242,12 @@ class MultiStrategyEngine:
                     c.metadata.get("affected_peers", []),
                     regime_context=regime_context,
                 )
-            elif analysis_type == "litigation":
-                llm_result = analyzer.analyze_litigation(
-                    c.metadata.get("case_name", ""),
-                    c.metadata.get("nature_of_suit", ""),
-                    c.metadata.get("cause", ""),
-                    c.metadata.get("court", ""),
-                    regime_context=regime_context,
-                )
-            elif analysis_type == "insider_activity":
-                cluster_type = c.metadata.get("cluster_type", "")
-                form4_options = {}
-                if 'form4_context' in c.metadata or 'form4_evidence_policy' in c.metadata:
-                    from .form4_inputs import form4_analysis_inputs
-                    form4_options['form4_context'] = form4_analysis_inputs(c, filing_data, universe)
-                if cluster_type == "buy_cluster":
-                    llm_result = analyzer.analyze_insider_context(
-                        c.metadata.get("filings", []),
-                        c.ticker,
-                        regime_context=regime_context,
-                        **form4_options,
-                    )
-                elif cluster_type == "sell_pattern":
-                    llm_result = analyzer.analyze_10b5_1_plan(
-                        c.metadata.get("filings", []),
-                        c.ticker,
-                        regime_context=regime_context,
-                        **form4_options,
-                    )
-            elif analysis_type == "filing_change":
-                llm_result = analyzer.analyze_filing_change(
-                    c.metadata.get("current_text", ""),
-                    c.metadata.get("prior_text", ""),
-                    c.ticker,
-                    regime_context=regime_context,
-                )
-            elif analysis_type in {"material_event", "activist_stake", "passive_stake"}:
-                text = c.metadata.get("current_text", "")
-                if not isinstance(text, str) or not text.strip():
-                    raise ValueError("missing_source_text")
-                llm_result = analyzer.analyze_filing_change(text, "", c.ticker, regime_context=regime_context)
-            elif analysis_type == "quantum_readiness":
-                text = c.metadata.get("analysis_text", "")
-                if not isinstance(text, str) or not text.strip():
-                    raise ValueError("missing_source_text")
-                llm_result = analyzer.analyze_quantum_readiness(text, c.ticker, text_source="news", regime_context=regime_context)
             elif analysis_type == "commodity_macro":
                 llm_result = analyzer.analyze_commodity_macro(
                     ticker=c.ticker, commodity_name=c.metadata.get("commodity", ""),
                     cot_context=c.metadata.get("cot_evidence", {}),
                     macro_context=c.metadata.get("macro_evidence", {}),
                     regime_context=regime_context)
-            elif analysis_type == "exec_comp":
-                llm_result = analyzer.analyze_exec_comp(
-                    c.metadata.get("proxy_text", ""),
-                    c.ticker,
-                    regime_context=regime_context,
-                )
             elif analysis_type == "ag_weather":
                 llm_result = analyzer.analyze_ag_weather(
                     ticker=c.ticker,
@@ -2457,20 +2280,16 @@ class MultiStrategyEngine:
             if not isinstance(llm_result, dict) or not llm_result:
                 raise ValueError("analysis_unavailable")
             llm_result = dict(llm_result)
-            abstained = full_regulation and (
-                llm_result.get("document_assessment") == "assessed_no_directional_thesis"
-            )
-            if not abstained and llm_result.get("direction") not in {"long", "short", "neutral"}:
+            if llm_result.get("direction") not in {"long", "short", "neutral"}:
                 raise ValueError("invalid_direction")
             score_key = "conviction" if "conviction" in llm_result else "score"
-            value = 0.0 if abstained else llm_result.get(score_key)
+            value = llm_result.get(score_key)
             if isinstance(value, bool) or not isinstance(value, (int, float, str)):
                 raise ValueError("invalid_score")
             score = float(value)
             if not math.isfinite(score) or not 0 <= score <= 1:
                 raise ValueError("invalid_score")
-            if not abstained:
-                llm_result[score_key] = score
+            llm_result[score_key] = score
             for key in ("defendant_ticker", "primary_ticker"):
                 if key in llm_result and (not isinstance(llm_result[key], str) or len(llm_result[key]) > 16):
                     raise ValueError(f"invalid_{key}")
@@ -2503,28 +2322,9 @@ class MultiStrategyEngine:
                 if not isinstance(impacts, list) or len(impacts) > 50 or any(not isinstance(item, dict) or not isinstance(item.get("ticker"), str) or not isinstance(item.get("relationship"), str) or not isinstance(item.get("estimated_impact", item.get("impact")), str) for item in impacts):
                     raise ValueError("invalid_secondary_impacts")
             ticker = c.ticker
-            if full_regulation:
-                if llm_result.get('document_assessment') == 'assessed_no_directional_thesis' or abstained:
-                    if llm_result.get('target_ticker') is not None:
-                        raise ValueError('invalid_regulation_target')
-                    ticker = ''
-                    c.journal_only = True
-                elif llm_result.get('document_assessment') == 'assessed_directional':
-                    ticker = llm_result.get('target_ticker')
-                    if not ticker or ticker not in {item['ticker'] for item in regulation_arguments['target_bindings']}:
-                        raise ValueError('invalid_regulation_target')
-                else:
-                    raise ValueError('missing_required_regulation_analysis')
-            elif full_filing and not ticker:
-                if llm_result.get('document_assessment') != 'assessed_no_directional_thesis':
-                    raise ValueError('unresolved_issuer')
-                c.journal_only = True
-                c.metadata['non_actionable_reason'] = 'equity_universe_unresolved'
-            elif not ticker:
+            if not ticker:
                 ticker = llm_result.get("defendant_ticker") or next(iter(llm_result.get("affected_tickers", [])), "")
                 ticker = ticker.strip().upper()
-                if 'edgar' in self.ar_config.get('retired_sources', {}):
-                    raise ValueError('invalid_retired_source_identity_dependency')
                 edgar = self.registry.get("edgar")
                 if not ticker or edgar is None or not edgar.validate_ticker(ticker):
                     raise ValueError("unresolved_issuer")
@@ -2533,7 +2333,7 @@ class MultiStrategyEngine:
             if reuse is not None:
                 analyzer.last_call_provenance["request_reuse"] = reuse
                 c.metadata["model_provenance"] = dict(analyzer.last_call_provenance)
-            c.ticker, c.direction, c.score = ticker, 'neutral' if abstained else llm_result["direction"], score
+            c.ticker, c.direction, c.score = ticker, llm_result["direction"], score
             c.metadata["llm_analysis"] = llm_result
             c.metadata["analysis_status"] = "validated"
             if c.metadata.get("non_actionable_reason") == "missing_source_text":
@@ -2580,16 +2380,4 @@ class MultiStrategyEngine:
                     'analysis_failure_reason': c.metadata.get('analysis_failure_reason') if status == 'failed' else None,
                     'model_provenance': deepcopy(provenance) if isinstance(provenance, dict) else {},
                 }
-            if regulation_call_started:
-                attempt = getattr(analyzer, 'last_regulation_attempt', None)
-                provenance = getattr(analyzer, 'last_call_provenance', None)
-                if isinstance(attempt, dict):
-                    c.metadata['regulation_model_attempt'] = deepcopy(attempt)
-                    # A successful candidate commit can append its reuse
-                    # receipt after analyzer validation. Keep both retained
-                    # copies bound to the same final transport provenance.
-                    if isinstance(provenance, dict):
-                        c.metadata['regulation_model_attempt']['model_provenance'] = deepcopy(provenance)
-                if isinstance(provenance, dict):
-                    c.metadata['model_provenance'] = deepcopy(provenance)
             end_candidate_response(reuse_token)

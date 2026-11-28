@@ -269,6 +269,101 @@ def is_source_available(payload: Any) -> bool:
     return True
 
 
+def _tier2_failure_rank(reason_code: str, http_status: int | None) -> tuple[int, int]:
+    """Explicit severity rank for Tier-2 failure aggregation.
+
+    Higher rank wins:
+    invalid_response > 4xx http_error > 5xx http_error > timeout > transport_error > provider_error.
+    """
+    if reason_code == "invalid_response":
+        return (6, http_status or 0)
+    if reason_code == "http_error":
+        if http_status is not None and 400 <= http_status < 500:
+            return (5, http_status)
+        if http_status is not None and 500 <= http_status < 600:
+            return (4, http_status)
+        return (4, http_status or 0)
+    if reason_code == "timeout":
+        return (3, http_status or 0)
+    if reason_code == "transport_error":
+        return (2, http_status or 0)
+    if reason_code == "provider_error":
+        return (1, http_status or 0)
+    return (0, http_status or 0)
+
+
+def _tier2_error_coverage(
+    err: SourceFetchError | None = None,
+    *,
+    status: str = "unavailable",
+    reason_code: str | None = None,
+    http_status: int | None = None,
+    attempts: int | None = None,
+) -> dict[str, Any]:
+    """Build a uniform Tier-2 ``_coverage`` error block."""
+    return {
+        "status": status,
+        "reason_code": (
+            reason_code
+            if reason_code is not None
+            else (err.reason_code if err is not None else "provider_error")
+        ),
+        "http_status": (
+            http_status
+            if http_status is not None
+            else (err.http_status if err is not None else None)
+        ),
+        "attempts": (
+            attempts
+            if attempts is not None
+            else (err.attempts if err is not None else 0)
+        ),
+    }
+
+
+def _tier2_aggregated_coverage(
+    failure_details: Sequence[tuple[str, int | None, int]],
+    *,
+    has_partial: bool,
+) -> dict[str, Any]:
+    """Select the highest-severity Tier-2 failure into a uniform ``_coverage`` dict."""
+    reason_code, http_status, _ = max(
+        failure_details,
+        key=lambda item: _tier2_failure_rank(item[0], item[1]),
+        default=("provider_error", None, 0),
+    )
+    return _tier2_error_coverage(
+        status="partial" if has_partial else "unavailable",
+        reason_code=reason_code,
+        http_status=http_status,
+        attempts=max((item[2] for item in failure_details), default=0),
+    )
+
+
+def _tier2_error_payload(
+    err: SourceFetchError,
+    *,
+    partial_data: Mapping[str, Any] | None = None,
+    extra: Mapping[str, Any] | None = None,
+    has_partial: bool | None = None,
+) -> dict[str, Any]:
+    """Build a uniform Tier-2 error payload carrying ``error`` and ``_coverage``."""
+    merged: dict[str, Any] = {}
+    if extra:
+        merged.update(extra)
+    if err.partial_data:
+        merged.update(err.partial_data)
+    if partial_data:
+        merged.update(partial_data)
+    partial_flag = bool(err.partial_data or partial_data) if has_partial is None else has_partial
+    merged["error"] = str(err)
+    merged["_coverage"] = _tier2_error_coverage(
+        err,
+        status="partial" if partial_flag else "unavailable",
+    )
+    return merged
+
+
 def evaluate_strategy_circuit_breaker(
     data: Mapping[str, Any],
     strategies: Sequence[Any],
@@ -444,17 +539,11 @@ class DataAcquisitionService:
             except Exception as exc:
                 safe = source_fetch_error(f"{name} acquisition failed", exc)
                 logger.warning("Tier-2 source %s unavailable: %s", name, safe)
-                return {
-                    **safe.partial_data,
-                    "error": str(safe),
-                    **({"_request_diagnostics": list(diagnostics)} if diagnostics else {}),
-                    "_coverage": {
-                        "status": "unavailable",
-                        "reason_code": safe.reason_code,
-                        "http_status": safe.http_status,
-                        "attempts": safe.attempts,
-                    },
-                }
+                return _tier2_error_payload(
+                    safe,
+                    extra={"_request_diagnostics": list(diagnostics)} if diagnostics else None,
+                    has_partial=False,
+                )
 
         data: dict[str, Any] = {}
         universe_policy = self.ar_config.get("equity_universe_policy")
@@ -525,10 +614,7 @@ class DataAcquisitionService:
         if api_tasks:
             def _err(name: str, exc: Exception) -> dict[str, Any]:
                 safe = source_fetch_error(f"{name} acquisition failed", exc)
-                return {
-                    "error": str(safe),
-                    "_coverage": {"status": "unavailable", "reason_code": safe.reason_code},
-                }
+                return _tier2_error_payload(safe, has_partial=False)
 
             fetched = _gather_with_timeout(api_tasks, remaining, _err)
             data.update(fetched)
@@ -625,6 +711,7 @@ class DataAcquisitionService:
         core_tickers = list(YAHOO_RESEARCH_CORE_TICKERS)
         result: dict[str, Any] = {}
         failures: list[str] = []
+        failure_details: list[tuple[str, int | None, int]] = []
 
         logger.info("Fetching Yahoo research prices for %d live core tickers", len(core_tickers))
         try:
@@ -634,6 +721,7 @@ class DataAcquisitionService:
         except Exception as exc:
             error = source_fetch_error("Yahoo research history failed", exc)
             failures.append(str(error))
+            failure_details.append((error.reason_code, error.http_status, error.attempts))
             if capability:
                 groups["research_prices"] = acquisition_group(core_tickers, error=error)
             prices_df = error.partial_data.get("prices", pd.DataFrame())
@@ -661,6 +749,7 @@ class DataAcquisitionService:
         except Exception as exc:
             error = source_fetch_error("Yahoo VIX history failed", exc)
             failures.append(str(error))
+            failure_details.append((error.reason_code, error.http_status, error.attempts))
             if capability:
                 groups["vix"] = acquisition_group(["^VIX"], error=error)
             vix_df = error.partial_data.get("vix", pd.DataFrame()) if capability else pd.DataFrame()
@@ -669,6 +758,10 @@ class DataAcquisitionService:
 
         if failures:
             result["error"] = "; ".join(failures)
+            result["_coverage"] = _tier2_aggregated_coverage(
+                failure_details,
+                has_partial=bool(prices or "vix" in result),
+            )
         if capability:
             result["_capability_acquisition"] = acquisition_manifest(
                 "yfinance",
@@ -716,6 +809,7 @@ class DataAcquisitionService:
 
         result: dict[str, Any] = {}
         failures: list[str] = []
+        failure_details: list[tuple[str, int | None, int]] = []
 
         def _acquire(operation: str, fn: Any, *args: Any, **kwargs: Any) -> Any:
             try:
@@ -723,6 +817,7 @@ class DataAcquisitionService:
             except Exception as exc:
                 err = source_fetch_error("Finnhub acquisition incomplete", exc)
                 failures.append(f"{operation}: {err}")
+                failure_details.append((err.reason_code, err.http_status, err.attempts))
                 if operation == "peers":
                     return err.partial_data
                 return err.partial_data.get("earnings" if operation == "earnings" else "news", [])
@@ -869,6 +964,12 @@ class DataAcquisitionService:
 
         if failures:
             result["error"] = "; ".join(failures)
+            result["_coverage"] = _tier2_aggregated_coverage(
+                failure_details,
+                has_partial=any(
+                    key in result for key in ("transcripts", "disruption_news", "supply_chains")
+                ),
+            )
         result["coverage"] = {
             "contract": "finnhub-acquisition-v2",
             "status": "partial" if failures else "complete",
@@ -901,6 +1002,7 @@ class DataAcquisitionService:
         groups: dict[str, Any] = {}
         result: dict[str, Any] = {}
         failures: list[str] = []
+        failure_details: list[tuple[str, int | None, int]] = []
 
         for label, group_key, method_name in (
             ("credit spreads", "credit_spreads", "fetch_credit_spreads"),
@@ -915,6 +1017,7 @@ class DataAcquisitionService:
             except SourceFetchError as exc:
                 result.update(exc.partial_data)
                 failures.append(str(exc))
+                failure_details.append((exc.reason_code, exc.http_status, exc.attempts))
                 if capability:
                     groups[group_key] = acquisition_group(
                         FRED_GROUPS[group_key], error=exc, independent=True
@@ -922,6 +1025,7 @@ class DataAcquisitionService:
             except Exception as exc:
                 logger.warning("FRED %s fetch failed: %s", label, exc)
                 failures.append(f"FRED {label} [provider_error]")
+                failure_details.append(("provider_error", None, 0))
                 if capability:
                     groups[group_key] = acquisition_group(
                         FRED_GROUPS[group_key], error_text=failures[-1]
@@ -938,6 +1042,13 @@ class DataAcquisitionService:
             )
         if failures:
             result["error"] = "; ".join(failures)
+            result["_coverage"] = _tier2_aggregated_coverage(
+                failure_details,
+                has_partial=any(
+                    key not in {"_capability_acquisition", "error", "vintage", "_coverage"}
+                    for key in result
+                ),
+            )
         result["vintage"] = {
             "as_of": end_date,
             "realtime_start": end_date,
@@ -986,11 +1097,21 @@ class DataAcquisitionService:
                 and contracts.coverage.get("issuer_attribution", {}).get("complete") is False
             ):
                 payload["error"] = "USASpending issuer attribution incomplete"
+                payload["_coverage"] = _tier2_error_coverage(
+                    status="partial" if result["contracts"] else "unavailable",
+                    reason_code="provider_error",
+                    http_status=None,
+                    attempts=1,
+                )
             return payload
         except Exception as exc:
             safe_error = source_fetch_error("USASpending contract fetch failed", exc)
             logger.warning("Tier-2 USASpending unavailable: %s", safe_error)
-            return {**payload, **safe_error.partial_data, "error": str(safe_error)}
+            return _tier2_error_payload(
+                safe_error,
+                extra=payload,
+                has_partial=bool(payload or safe_error.partial_data),
+            )
 
     def fetch_noaa_data(
         self, trading_date: str, vintage_as_of: str | None = None
@@ -1004,16 +1125,7 @@ class DataAcquisitionService:
             return source.fetch_ag_weather_summary(trading_date, lookback_days=30, **options)
         except Exception as exc:
             err = source_fetch_error("NOAA acquisition failed", exc)
-            return {
-                **err.partial_data,
-                "error": str(err),
-                "_coverage": {
-                    "status": "partial" if err.partial_data else "unavailable",
-                    "reason_code": err.reason_code,
-                    "http_status": err.http_status,
-                    "attempts": err.attempts,
-                },
-            }
+            return _tier2_error_payload(err)
 
     def fetch_usda_data(
         self, trading_date: str, vintage_as_of: str | None = None
@@ -1047,23 +1159,20 @@ class DataAcquisitionService:
                     raise SourceFetchError("USDA access missing", reason_code="provider_error")
             except Exception as exc:
                 err = source_fetch_error("USDA crop acquisition incomplete", exc)
-                return {
-                    "crop_progress": {},
-                    "coverage": {
-                        "complete": False,
-                        "crops": {
-                            commodity: {**scope, "complete": False}
-                            for commodity, scope in scopes.items()
+                return _tier2_error_payload(
+                    err,
+                    extra={
+                        "crop_progress": {},
+                        "coverage": {
+                            "complete": False,
+                            "crops": {
+                                commodity: {**scope, "complete": False}
+                                for commodity, scope in scopes.items()
+                            },
                         },
                     },
-                    "error": str(err),
-                    "_coverage": {
-                        "status": "unavailable",
-                        "reason_code": err.reason_code,
-                        "http_status": err.http_status,
-                        "attempts": err.attempts,
-                    },
-                }
+                    has_partial=False,
+                )
 
         for commodity, scope in scopes.items():
             year = scope["reporting_year"]
@@ -1141,22 +1250,10 @@ class DataAcquisitionService:
             }
         if failures:
             result["error"] = "; ".join(failures)
-            reason_code, http_status, _ = max(
+            result["_coverage"] = _tier2_aggregated_coverage(
                 failure_details,
-                key=lambda item: (
-                    item[0] == "invalid_response"
-                    or item[1] in {400, 401, 403, 404, 410},
-                    item[0],
-                    item[1] or 0,
-                ),
-                default=("provider_error", None, 0),
+                has_partial=any(crop_progress.values()),
             )
-            result["_coverage"] = {
-                "status": "partial" if any(crop_progress.values()) else "unavailable",
-                "reason_code": reason_code,
-                "http_status": http_status,
-                "attempts": max((item[2] for item in failure_details), default=0),
-            }
         return result
 
     def fetch_drought_data(
@@ -1182,16 +1279,7 @@ class DataAcquisitionService:
             return result
         except Exception as exc:
             err = source_fetch_error("Drought Monitor acquisition failed", exc)
-            return {
-                **err.partial_data,
-                "error": str(err),
-                "_coverage": {
-                    "status": "partial" if err.partial_data else "unavailable",
-                    "reason_code": err.reason_code,
-                    "http_status": err.http_status,
-                    "attempts": err.attempts,
-                },
-            }
+            return _tier2_error_payload(err)
 
     def fetch_cftc_data(
         self, trading_date: str | None = None, vintage_as_of: str | None = None
@@ -1200,12 +1288,35 @@ class DataAcquisitionService:
         source = self.registry.get("cftc")
         if source is None:
             return {}
-        return source.fetch(
-            {
-                "method": "cot_positioning",
-                "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
-                "lookback_weeks": 52,
-                "as_of": trading_date,
-                **({"vintage_as_of": vintage_as_of} if vintage_as_of is not None else {}),
+        try:
+            payload = source.fetch(
+                {
+                    "method": "cot_positioning",
+                    "commodities": ["gold", "silver", "crude_oil", "nat_gas", "copper"],
+                    "lookback_weeks": 52,
+                    "as_of": trading_date,
+                    **({"vintage_as_of": vintage_as_of} if vintage_as_of is not None else {}),
+                }
+            )
+        except Exception as exc:
+            err = source_fetch_error("CFTC COT acquisition failed", exc)
+            return _tier2_error_payload(err)
+        if isinstance(payload, dict) and payload.get("error") and "_coverage" not in payload:
+            err_text = str(payload["error"])
+            reason = (
+                err_text
+                if err_text in {"invalid_response", "http_error", "timeout", "transport_error", "provider_error"}
+                else "provider_error"
+            )
+            payload = {
+                **payload,
+                "_coverage": _tier2_error_coverage(
+                    status="partial"
+                    if any(key not in {"error", "_coverage"} for key in payload)
+                    else "unavailable",
+                    reason_code=reason,
+                    http_status=None,
+                    attempts=1,
+                ),
             }
-        )
+        return payload

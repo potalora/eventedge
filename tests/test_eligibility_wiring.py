@@ -46,8 +46,8 @@ class TestCohortEligibilityWiring:
         assert policy["options_overlays_enabled"] is False
         assert "options" not in DEFAULT_CONFIG
 
-    def test_autoresearch_model_is_luna_high_effort(self):
+    def test_autoresearch_model_is_gemini_hydrogen_high_effort(self):
         from tradingagents.default_config import DEFAULT_CONFIG
         autoresearch = DEFAULT_CONFIG["autoresearch"]
-        assert autoresearch["autoresearch_model"] == "gpt-6-luna"
+        assert autoresearch["autoresearch_model"] == "gemini-4-hydrogen"
         assert autoresearch["llm_effort"] == "high"

@@ -125,3 +125,44 @@ def test_classify_session_accepts_gpt_6_2_sol_native_model_evidence():
     summary = summarize_continuity(rows, through=date(2026, 10, 16))
     assert summary['local_operational_acceptance'] is True
     assert summary['native_models_observed'] == ['gpt-6-luna', 'gpt-6.2-sol']
+
+
+def test_classify_and_summarize_accept_gemini4_and_enforce_explicit_model_sets():
+    from tradingagents.strategies.orchestration.local_continuity import classify_session, summarize_continuity
+
+    value = observation()
+    value['native_models'] = ['gemini-4-hydrogen', 'gemini-4-neon']
+    classified = classify(value)
+    assert classified['qualifies'] is True
+    assert 'native_model_evidence' not in classified['reasons']
+
+    # Explicit Gemini-4 sets reject legacy sol/luna observations
+    legacy = observation()
+    legacy['native_models'] = ['gpt-6-luna', 'gpt-6.2-sol']
+    rejected = classify_session(
+        legacy,
+        expected_commit=COMMIT,
+        expected_profile=PROFILE,
+        expected_bounded_models={'gemini-4-hydrogen'},
+        expected_frontier_models={'gemini-4-neon'},
+    )
+    assert rejected['qualifies'] is False
+    assert 'native_model_evidence' in rejected['reasons']
+
+    earlier = observation('2026-10-09')
+    earlier['unexpected_failures'] = ['fred']
+    earlier['source_observations']['fred'] = 'failed'
+    earlier['native_models'] = ['gemini-4-hydrogen', 'gemini-4-neon']
+    rows = [classify(earlier)]
+    for session in SESSIONS:
+        obs = observation(session)
+        obs['native_models'] = ['gemini-4-hydrogen', 'gemini-4-neon']
+        rows.append(classify(obs))
+    summary = summarize_continuity(
+        rows,
+        through=date(2026, 10, 16),
+        expected_bounded_models={'gemini-4-hydrogen'},
+        expected_frontier_models={'gemini-4-neon'},
+    )
+    assert summary['local_operational_acceptance'] is True
+    assert summary['native_models_observed'] == ['gemini-4-hydrogen', 'gemini-4-neon']

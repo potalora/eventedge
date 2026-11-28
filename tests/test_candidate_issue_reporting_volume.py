@@ -149,11 +149,11 @@ def test_only_isolated_short_history_can_carry_valid_staging(damage):
         first['candidate_bar_quarantines'] = ['OTHER']
     elif damage == 'scope':
         first['candidate_input_issues'][0]['affected_cohorts'] = COHORTS[:-1]
-    if damage == 'multiple':
+    if damage in (None, 'multiple'):
         assert aggregate_candidate_input_issues(results, SESSION) == refs
         assert not _valid_daily_cohort_results(results, SESSION)
         for cohort_name, row in results.items():
-            row['candidate_input_acceptance'] = [
+            proofs = [
                 {
                     'version': 1,
                     'issue_sha256': f'{index:064x}',
@@ -161,9 +161,7 @@ def test_only_isolated_short_history_can_carry_valid_staging(damage):
                 }
                 for index, item in enumerate(refs, start=1)
             ]
-        assert _valid_daily_cohort_results(results, SESSION)
-    elif damage is None:
-        assert aggregate_candidate_input_issues(results, SESSION) == refs
+            row['candidate_input_acceptance'] = proofs if len(proofs) > 1 else proofs[0]
         assert _valid_daily_cohort_results(results, SESSION)
     else:
         with pytest.raises(ValueError):

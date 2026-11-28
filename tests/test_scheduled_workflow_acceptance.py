@@ -1,4 +1,4 @@
-"""Release gate: actual scheduled shell, frozen gen003-clean profile and 16 books."""
+"""Release gate: actual scheduled shell, frozen gemini4-clean profile and 16 books."""
 import json
 from pathlib import Path
 import subprocess
@@ -34,7 +34,7 @@ def assert_complete(harness, session):
     assert sum(len(rows) for rows in harness.book_rows('order_intents').values()) > 0
     trace = harness.trace()
     assert not any(row['kind'] in {'forbidden_network', 'unexpected_httpx'} for row in trace)
-    expected = {'analysis': 'gpt-6.2-sol', 'committee': 'gpt-6.2-sol'}
+    expected = {'analysis': 'gemini-4-neon', 'committee': 'gemini-4-neon'}
     for role, model in expected.items():
         matching = [row for row in trace if row['kind'] == 'model' and row['role'] == role]
         assert matching, role
@@ -43,8 +43,8 @@ def assert_complete(harness, session):
     effective = harness.effective_config_proof()
     assert effective['blocked_tickers'] == ['GOOGL', 'GOOG']
     assert effective['enabled_strategies'] == _ACTIVE_STRATEGIES
-    assert effective['thesis_model'] == 'gpt-6.2-sol'
-    assert effective['portfolio_committee_model'] == 'gpt-6.2-sol'
+    assert effective['thesis_model'] == 'gemini-4-neon'
+    assert effective['portfolio_committee_model'] == 'gemini-4-neon'
     assert screening['binding']['source_identity']['configuration'] == effective['source_configuration']
     assert set(screening['horizons']) == {'30d', '3m', '6m', '1y'}
     for horizon in screening['horizons'].values():
@@ -54,7 +54,7 @@ def assert_complete(harness, session):
     assert len({row['pid'] for row in workers}) >= 2
     assert any(row['kind'] == 'bootstrap' and any('transport_worker.py' in arg for arg in row['argv']) for row in trace)
     assert harness.audit['original_sha256'] == ORIGINAL_SHA
-    assert harness.audit['fixture_sha256'] != ORIGINAL_SHA
+    assert harness.audit['fixture_sha256'] == ORIGINAL_SHA
     assert harness.audit['policy_overrides'] == []
     assert harness.audit['candidate_profile_sha256'] == ORIGINAL_SHA
     return report
@@ -197,17 +197,33 @@ print('all outbound boundaries denied before network IO')
     assert not [row for row in harness.trace() if row['kind'] in {'http', 'sdk', 'model'}]
 
 
-def test_gen003_clean_profile_audit_and_effective_config_roundtrip(tmp_path):
+def test_gemini4_clean_profile_audit_and_effective_config_roundtrip(tmp_path):
     harness = create_harness(tmp_path)
-    original = json.loads((Path(__file__).parents[1] / 'config/profiles/gen003-clean.json').read_text())
+    original = json.loads((Path(__file__).parents[1] / 'config/profiles/gemini4-clean.json').read_text())
     frozen = json.loads(harness.profile.read_text())
     assert frozen['enabled_strategies'] == _ACTIVE_STRATEGIES
-    assert original['thesis_model'] == frozen['thesis_model'] == 'gpt-6.2-sol'
+    assert original['thesis_model'] == frozen['thesis_model'] == 'gemini-4-neon'
+    assert original['bounded_model'] == frozen['bounded_model'] == 'gemini-4-hydrogen'
+    assert original['llm_billing_mode'] == frozen['llm_billing_mode'] == 'api'
     assert harness.audit['original_sha256'] == ORIGINAL_SHA
-    assert harness.audit['profile_variant'] == 'gen003_clean'
+    assert harness.audit['fixture_sha256'] == ORIGINAL_SHA
+    assert harness.audit['profile_variant'] == 'gemini4_clean'
     assert harness.audit['policy_overrides'] == []
-    assert [row['path'] for row in harness.audit['substitutions']] == [['chatgpt_plan_auth_path']]
+    assert harness.audit['substitutions'] == []
     effective = harness.effective_config_proof()
     assert effective['blocked_tickers'] == ['GOOGL', 'GOOG']
     assert effective['enabled_strategies'] == _ACTIVE_STRATEGIES
     assert not [row for row in harness.trace() if row['kind'] in {'http', 'sdk', 'model', 'forbidden_network', 'unexpected_httpx'}]
+
+
+def test_controller_fails_closed_without_gemini_credentials_on_idle_tick(tmp_path):
+    harness = create_harness(tmp_path)
+    harness.env.pop('GEMINI_API_KEY', None)
+    harness.env.pop('GOOGLE_API_KEY', None)
+    result = harness.run('2026-10-14T15:00:00+00:00', entrypoint='controller')
+    assert result.returncode == 1, result.stdout + result.stderr
+    projection = json.loads(result.stdout)
+    assert projection['status'] == 'operator_required'
+    assert projection['controller_reason_code'] == 'auth_required'
+    status_file = harness.repo / 'data/runtime_recovery/status.json'
+    assert json.loads(status_file.read_text())['controller_reason_code'] == 'auth_required'

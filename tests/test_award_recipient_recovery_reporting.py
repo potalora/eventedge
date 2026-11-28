@@ -221,8 +221,14 @@ def test_failed_native_fallback_remains_reported_source_failure(tmp_path, transp
     result, errors = report_sources(tmp_path, payload)
     assert errors == []
     assert result['recovered'] == []
-    assert result['observations']['usaspending'] == 'failed'
-    assert {'provider': 'usaspending', 'reason_code': 'provider_error', 'http_status': None} in result['unresolved']
+    assert payload['_coverage']['status'] == 'partial'
+    assert result['observations']['usaspending'] == 'partial'
+    assert any(
+        row['provider'] == 'usaspending'
+        and row['reason_code'] == payload['_coverage']['reason_code']
+        and row['http_status'] == payload['_coverage']['http_status']
+        for row in result['unresolved']
+    )
     for event in payload['_request_diagnostics']:
         if event['reason_code'] not in (None, 'success'):
             assert {**event, 'source': 'usaspending'} in result['unresolved']
@@ -314,7 +320,11 @@ def test_failed_source_preserves_independent_successful_transport_retry(tmp_path
     result, errors = report_sources(tmp_path, failed_fallback_payload)
     assert errors == []
     assert result['recovered'] == [{**event, 'source': 'usaspending', 'reason_code': 'success'}]
-    assert {'provider': 'usaspending', 'reason_code': 'provider_error', 'http_status': None} in result['unresolved']
+    assert {
+        'provider': 'usaspending',
+        'reason_code': failed_fallback_payload['_coverage']['reason_code'],
+        'http_status': failed_fallback_payload['_coverage']['http_status'],
+    } in result['unresolved']
 
 
 def test_mixed_recipient_fallback_failure_preserves_full_pipeline_health_and_replay(pipeline, monkeypatch, proof):

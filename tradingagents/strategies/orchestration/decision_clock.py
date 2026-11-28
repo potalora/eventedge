@@ -309,18 +309,6 @@ def _validate_research_inputs(owner, session, store, accepted, source_data, sour
     return enrichment, context
 
 
-def _document_final_binding(owner, session, source_data, source_digest, cutoff):
-    from ..document_review_clock import build_final_binding
-    from .research_screening import load_screening
-    horizons = tuple(sorted({cohort['config'].horizon for cohort in owner.cohorts}))
-    accepted = load_screening(owner, session, source_digest, horizons)
-    if accepted is None:
-        raise ValueError('invalid_document_decision_screening')
-    screened, _, receipt = accepted
-    return build_final_binding(owner._base_config, session, source_data, screened, source_digest, cutoff,
-        receipt['screening_sha256'])
-
-
 def _research_acquisition(config, session, source_data):
     acquisition = source_data.get('_decision_acquisition')
     if (not isinstance(acquisition, dict) or acquisition.get('policy') != PROSPECTIVE

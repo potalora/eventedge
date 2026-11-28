@@ -293,8 +293,8 @@ def test_source_inputs_gzip_json_fallback_when_pyarrow_unavailable(tmp_path, mon
 # ---------------------------------------------------------------------------
 
 
-def test_operating_contract_validates_gen003_clean_profile():
-    profile_path = REPO_ROOT / "config" / "profiles" / "gen003-clean.json"
+def test_operating_contract_validates_gemini4_clean_profile():
+    profile_path = REPO_ROOT / "config" / "profiles" / "gemini4-clean.json"
     raw = profile_path.read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
     payload = json.loads(raw.decode("utf-8"))
@@ -315,14 +315,14 @@ def test_operating_contract_validates_gen003_clean_profile():
     assert profile.config["autoresearch"]["award_attribution_policy"] == "verified_listed_targets_v1"
 
 
-def test_gen003_clean_applies_verified_listed_targets_policy():
+def test_gemini4_clean_applies_verified_listed_targets_policy():
     from tradingagents.default_config import DEFAULT_CONFIG
     from tradingagents.strategies.orchestration.generation_config import (
         apply_generation_config,
         read_generation_config,
     )
 
-    profile_path = REPO_ROOT / "config" / "profiles" / "gen003-clean.json"
+    profile_path = REPO_ROOT / "config" / "profiles" / "gemini4-clean.json"
     _, _, digest = read_generation_config(profile_path)
     applied = apply_generation_config(DEFAULT_CONFIG, profile_path, digest)
     assert applied["autoresearch"]["award_attribution_policy"] == "verified_listed_targets_v1"

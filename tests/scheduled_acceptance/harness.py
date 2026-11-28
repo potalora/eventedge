@@ -19,7 +19,7 @@ import tempfile
 import weakref
 
 ROOT = Path(__file__).resolve().parents[2]
-PROFILE = ROOT / 'config/profiles/gen003-clean.json'
+PROFILE = ROOT / 'config/profiles/gemini4-clean.json'
 ORIGINAL_SHA = hashlib.sha256(PROFILE.read_bytes()).hexdigest()
 GENERATION = 'gen_020'
 
@@ -269,7 +269,7 @@ print(json.dumps(assess_generation(Path(sys.argv[1]),sys.argv[2],sys.argv[3],
         return matches[0]
 
     def effective_config_proof(self):
-        """Bind the real worker config from the frozen gen003-clean profile."""
+        """Bind the real worker config from the frozen gemini4-clean profile."""
         if not self.scenario_path.exists():
             _json(self.scenario_path, {'now': '2026-10-14T22:00:00+00:00', 'session': '2026-10-14', 'fault': None})
         env = {
@@ -363,42 +363,21 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00'):
     original = json.loads(original_body)
     normalized = deepcopy(original)
 
-    # Auth storage refuses *any* Git ancestor, including an artifact basetemp
-    # nested in the real checkout. Keep the dummy grant in its own 0700 OS-temp
-    # directory and remove it when this harness is released (also at exit).
-    private = Path(tempfile.mkdtemp(prefix='eventedge-acceptance-auth-')).resolve()
-    auth_path = private / 'plan-auth.json'
-    _json(
-        auth_path,
-        {
-            'version': 1,
-            'issuer': 'https://auth.openai.com',
-            'host_id': 'urn:uuid:11111111-1111-4111-8111-111111111111',
-            'client_id': 'oaiapp_offline_acceptance',
-            'subject': 'constructed-acceptance-subject',
-            'profile_identity': '22222222-2222-4222-8222-222222222222',
-            'access_token': 'constructed-access-token',
-            'refresh_token': 'constructed-refresh-token',
-            'id_token': 'constructed-id-token',
-            'token_type': 'Bearer',
-            'expires_in': 604800,
-            'expires_at': 4102444800,
-            'scope': 'openid profile email offline_access resource.invoke chatgpt.tokens.use.direct',
-        },
-    )
-    auth_path.chmod(0o600)
-    normalized['chatgpt_plan_auth_path'] = str(auth_path)
+    # Keep an isolated disposable HOME directory and remove it when this harness
+    # is released (also at exit) so host credentials/dotfiles are never read.
+    private = Path(tempfile.mkdtemp(prefix='eventedge-acceptance-home-')).resolve()
     substitutions = _changes(original, normalized)
-    assert {tuple(row['path']) for row in substitutions} == {('chatgpt_plan_auth_path',)}
+    assert substitutions == []
 
     profile = state / 'generation-config.json'
-    _json(profile, normalized)
+    profile.write_bytes(original_body)
     profile_sha = sha(profile.read_bytes())
+    assert profile_sha == original_sha
 
     audit = {
         'original_sha256': original_sha,
         'fixture_sha256': profile_sha,
-        'profile_variant': 'gen003_clean',
+        'profile_variant': 'gemini4_clean',
         'policy_overrides': [],
         'candidate_profile_sha256': original_sha,
         'fixture_commit': commit,
@@ -409,10 +388,9 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00'):
             'requests HTTP responses',
             'Yahoo SDK download and earnings dates',
             'inert cot_reports availability module; real native archive parser',
-            'HTTPX/HTTPX2 physical SSE response',
-            'synthetic plan-auth grant',
+            'HTTPX physical Gemini generateContent response',
         ],
-        'scope': 'constructed external IO; exact gen003-clean profile; real internal shell/clock/ledger pipeline',
+        'scope': 'constructed external IO; exact gemini4-clean profile; real internal shell/clock/ledger pipeline',
     }
     _json(base / 'substitution-audit.json', audit)
     _json(
@@ -427,7 +405,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00'):
                     'state_dir': str(state),
                     'created_at': created_at,
                     'status': 'active',
-                    'description': 'Disposable scheduled acceptance; gen003-clean identity',
+                    'description': 'Disposable scheduled acceptance; gemini4-clean identity',
                     'run_history': [],
                     'config_file': str(profile),
                     'config_sha256': profile_sha,
@@ -466,6 +444,7 @@ def create_harness(tmp_path, *, created_at='2026-10-14T00:00:00+00:00'):
         'PYTHONDONTWRITEBYTECODE': '1',
         'GIT_CONFIG_NOSYSTEM': '1',
         'GIT_CONFIG_GLOBAL': os.devnull,
+        'GEMINI_API_KEY': 'offline-dummy',
         'ALPACA_API_KEY': 'offline-dummy',
         'ALPACA_SECRET_KEY': 'offline-dummy',
         'FINNHUB_API_KEY': 'offline-dummy',

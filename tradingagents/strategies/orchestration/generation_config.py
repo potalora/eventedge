@@ -1,7 +1,7 @@
 """Typed, secret-free generation configuration loader and validator.
 
 Supports canonical ``GenerationConfig`` profiles (e.g.
-``config/profiles/gen003-clean.json``) validated strictly through
+``config/profiles/gemini4-clean.json``) validated strictly through
 ``tradingagents.strategies.config.GenerationConfig`` as well as legacy
 ``{"execution": ..., "autoresearch": ...}`` overlay dicts.
 """
@@ -161,3 +161,55 @@ def apply_generation_config(
         ((configured + "-") if configured else "") + "generation-config-" + digest
     )
     return result
+
+
+def missing_gemini_credentials(
+    config_payload: GenerationConfig | Mapping[str, Any] | None,
+    environ: Mapping[str, str] | None = None,
+) -> bool:
+    """Return True when a Gemini API generation lacks GEMINI_API_KEY/GOOGLE_API_KEY."""
+    if config_payload is None:
+        return False
+    env = os.environ if environ is None else environ
+    if isinstance(config_payload, GenerationConfig):
+        billing = config_payload.llm_billing_mode
+        models: tuple[Any, ...] = (
+            config_payload.bounded_model,
+            config_payload.thesis_model,
+            config_payload.portfolio_committee_model,
+        )
+    elif isinstance(config_payload, Mapping):
+        if is_typed_generation_payload(config_payload):
+            typed = GenerationConfig.from_dict(config_payload)
+            billing = typed.llm_billing_mode
+            models = (
+                typed.bounded_model,
+                typed.thesis_model,
+                typed.portfolio_committee_model,
+            )
+        else:
+            ar = config_payload.get("autoresearch")
+            if not isinstance(ar, Mapping):
+                return False
+            billing = ar.get("llm_billing_mode", "api")
+            pt = ar.get("paper_trade")
+            pt_map = pt if isinstance(pt, Mapping) else {}
+            models = (
+                ar.get("bounded_model"),
+                ar.get("autoresearch_model"),
+                ar.get("thesis_model"),
+                ar.get("portfolio_committee_model"),
+                pt_map.get("portfolio_committee_model"),
+            )
+    else:
+        return False
+
+    if billing != "api":
+        return False
+    if not any(isinstance(model, str) and model.startswith("gemini-") for model in models):
+        return False
+    has_key = bool(
+        str(env.get("GEMINI_API_KEY", "") or "").strip()
+        or str(env.get("GOOGLE_API_KEY", "") or "").strip()
+    )
+    return not has_key

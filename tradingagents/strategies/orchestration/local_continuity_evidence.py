@@ -70,20 +70,49 @@ def _receipts(repo, identity, replay, cleanup):
     return replay_ok, cleanup_ok
 
 
-def _native(provenance, request=None, *, role=None):
-    """Native success has returned identity/response plus plan billing evidence."""
+def _native(
+    provenance,
+    request=None,
+    *,
+    role=None,
+    expected_models=None,
+    expected_effort='high',
+    expected_billing_mode='chatgpt_plan',
+):
+    """Native success has returned identity/response plus configured billing evidence."""
     _require(type(provenance) is dict)
     model = provenance.get('configured_model')
-    expected = {'gpt-6-luna'} if role == 'bounded' else {'gpt-6.1-sol', 'gpt-6.2-sol'}
-    _require(model in expected and provenance.get('returned_model') == model
-        and provenance.get('reasoning_effort') == 'high'
-        and provenance.get('billing_mode') == 'chatgpt_plan'
-        and provenance.get('effective_output_limit') is None
-        and type(provenance.get('response_id')) is str and bool(provenance['response_id']))
+    if expected_models is None:
+        expected = (
+            {'gpt-6-luna', 'gemini-4-hydrogen'}
+            if role == 'bounded'
+            else {'gpt-6.1-sol', 'gpt-6.2-sol', 'gemini-4-neon'}
+        )
+    else:
+        expected = set(expected_models)
+    returned_model = provenance.get('returned_model')
+    returned_matches = (
+        isinstance(returned_model, str)
+        and isinstance(model, str)
+        and (returned_model == model or returned_model.startswith(model + '-'))
+    )
+    _require(
+        model in expected
+        and returned_matches
+        and provenance.get('reasoning_effort') == expected_effort
+        and provenance.get('billing_mode') == expected_billing_mode
+        and (
+            provenance.get('effective_output_limit') is None
+            if expected_billing_mode == 'chatgpt_plan'
+            else True
+        )
+        and type(provenance.get('response_id')) is str
+        and bool(provenance['response_id'])
+    )
     _require(type(request) is dict and set(request) == {'version','model','role','effort',
         'max_tokens','temperature','system_sha256','system_bytes','prompt_sha256','prompt_bytes','request_sha256'})
     _require(request['version']=='research-model-request-v1' and request['model']==model
-        and request['role']==role and request['effort']=='high'
+        and request['role']==role and request['effort']==expected_effort
         and type(request['max_tokens']) is int and request['max_tokens']>0
         and type(request['temperature']) in (int,float) and math.isfinite(request['temperature'])
         and all(_sha(request[k]) for k in ('system_sha256','prompt_sha256','request_sha256'))
@@ -141,6 +170,8 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
         'native_models':[],'source_observations':{},'approved_exclusions':[],
         'unexpected_failures':[],'research_holds':[], 'fill_lifecycle_observed':False,
         'carried_positions_observed':False,'evidence_diagnostics':[]}
+    expected_bounded_models = None
+    expected_frontier_models = None
     def diagnostic(code):
         row['evidence_diagnostics'].append(code)
     try:
@@ -155,12 +186,43 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
             and Path(metadata['config_file']).name == 'generation-config.json')
         config=apply_generation_config(DEFAULT_CONFIG,metadata['config_file'],expected_profile)
         ar=config['autoresearch']
-        _require(ar.get('research_resilience_policy')==POLICY and ar.get('llm_billing_mode')=='chatgpt_plan'
-            and ar.get('autoresearch_model')=='gpt-6-luna' and ar.get('llm_effort')=='high'
-            and ar.get('thesis_model') in ('gpt-6.1-sol', 'gpt-6.2-sol') and ar.get('thesis_effort')=='high'
-            and ar.get('paper_trade',{}).get('portfolio_committee_model') in ('gpt-6.1-sol', 'gpt-6.2-sol')
-            and ar.get('paper_trade',{}).get('portfolio_committee_effort')=='high'
-            and ar.get('paper_trade',{}).get('portfolio_committee_enabled') is True)
+        billing_mode = ar.get('llm_billing_mode')
+        bounded_model = ar.get('bounded_model') or ar.get('autoresearch_model')
+        bounded_effort = ar.get('bounded_effort') or ar.get('llm_effort')
+        thesis_model = ar.get('thesis_model')
+        thesis_effort = ar.get('thesis_effort')
+        paper_trade = ar.get('paper_trade', {})
+        committee_model = paper_trade.get('portfolio_committee_model')
+        committee_effort = paper_trade.get('portfolio_committee_effort')
+        _require(
+            ar.get('research_resilience_policy') == POLICY
+            and billing_mode in ('chatgpt_plan', 'api')
+            and isinstance(bounded_model, str) and bool(bounded_model)
+            and isinstance(thesis_model, str) and bool(thesis_model)
+            and isinstance(committee_model, str) and bool(committee_model)
+            and isinstance(bounded_effort, str) and bool(bounded_effort)
+            and isinstance(thesis_effort, str) and bool(thesis_effort)
+            and isinstance(committee_effort, str) and bool(committee_effort)
+            and paper_trade.get('portfolio_committee_enabled') is True
+        )
+        if billing_mode == 'chatgpt_plan':
+            _require(
+                bounded_model == 'gpt-6-luna'
+                and thesis_model in ('gpt-6.1-sol', 'gpt-6.2-sol')
+                and committee_model in ('gpt-6.1-sol', 'gpt-6.2-sol')
+            )
+            expected_bounded_models = {'gpt-6-luna'}
+            expected_thesis_models = {'gpt-6.1-sol', 'gpt-6.2-sol'}
+            expected_committee_models = {'gpt-6.1-sol', 'gpt-6.2-sol'}
+            expected_frontier_models = {'gpt-6.1-sol', 'gpt-6.2-sol'}
+        else:
+            from tradingagents.strategies.llm_utils import model_provider
+            for configured_model in (bounded_model, thesis_model, committee_model):
+                model_provider(configured_model)
+            expected_bounded_models = {bounded_model}
+            expected_thesis_models = {thesis_model}
+            expected_committee_models = {committee_model}
+            expected_frontier_models = {thesis_model, committee_model}
         report=report_io.build_operational_report(repo,generation,session,snapshot_guaranteed=True)
         epoch=_session_epoch(state,session,generation,expected_commit)
         _require(epoch is not None and report['epoch_id']==epoch)
@@ -235,7 +297,14 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
                 and outcome['response_bytes']>0 and outcome['response_encoding']=='utf-8')
             role=outcome['model_request']['role']
             _require(role in ('bounded','thesis'))
-            models.add(_native(outcome['model_provenance'],outcome['model_request'],role=role))
+            models.add(_native(
+                outcome['model_provenance'],
+                outcome['model_request'],
+                role=role,
+                expected_models=expected_bounded_models if role == 'bounded' else expected_thesis_models,
+                expected_effort=bounded_effort if role == 'bounded' else thesis_effort,
+                expected_billing_mode=billing_mode,
+            ))
         checks['model_outcomes']=True
         committee=True;committee_calls=0
         for name,result in wire.items():
@@ -261,7 +330,14 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
                 if carried:
                     row['carried_positions_observed']=True
             if status.get('status') in ('selected','abstained'):
-                models.add(_native(status.get('model_provenance'),status.get('model_request'),role='committee'))
+                models.add(_native(
+                    status.get('model_provenance'),
+                    status.get('model_request'),
+                    role='committee',
+                    expected_models=expected_committee_models,
+                    expected_effort=committee_effort,
+                    expected_billing_mode=billing_mode,
+                ))
                 committee_calls+=1
             elif status.get('status')=='no_candidates':
                 _require(status.get('eligible_count')==0 and status.get('selected_count')==0)
@@ -276,7 +352,13 @@ def _collect(repo, generation, session, expected_commit, expected_profile, repla
         checks['model_outcomes']=False
     identity={key:row[key] for key in _IDENTITY}
     checks['replay'],checks['cleanup']=_receipts(repo,identity,replay,cleanup)
-    result=classify_session(row,expected_commit=expected_commit,expected_profile=expected_profile)
+    result=classify_session(
+        row,
+        expected_commit=expected_commit,
+        expected_profile=expected_profile,
+        expected_bounded_models=expected_bounded_models,
+        expected_frontier_models=expected_frontier_models,
+    )
     if row['evidence_diagnostics']:
         result['qualifies']=False
         result['reasons']=sorted(set(result['reasons'])|{'accepted_artifact_validation_failed'})

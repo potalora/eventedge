@@ -45,10 +45,10 @@ Strategies screen macro, agricultural, federal contract, earnings, and supply-ch
 
 ## Models and transport
 
-`gen_003` defaults to `chatgpt_plan` OAuth transport (`chatgpt_plan_auth_path`, defaulting to `/opt/data/private/eventedge/credentials/plan-auth.json` in `config/profiles/gen003-clean.json`), running in a bounded `TransportWorkerPool` (`tradingagents/strategies/transport_worker.py`) with hard `SIGKILL` wall-clock timeouts and SSE metadata hardening:
+EventEdge defaults to direct Google AI Studio Gemini 4 API transport (`llm_billing_mode: "api"`, authenticating via `GEMINI_API_KEY` with `GOOGLE_API_KEY` fallback, profile `config/profiles/gemini4-clean.json`), running over `httpx.Client` inside a bounded `TransportWorkerPool` (`tradingagents/strategies/transport_worker.py`) with hard `SIGKILL` wall-clock timeouts:
 
-- **`gpt-6.2-sol` (`high` effort)**: Unstructured thesis analysis and 1-call-per-horizon portfolio committee synthesis (`PortfolioCommittee.synthesize_horizon()`, 4 committee calls per session).
-- **`gpt-6-luna` (`high` effort)**: Bounded structured assessments for `commodity_macro` and `weather_ag`.
+- **`gemini-4-neon` (`high` thinking level)**: Unstructured thesis analysis and 1-call-per-horizon portfolio committee synthesis (`PortfolioCommittee.synthesize_horizon()`, 4 committee calls per session).
+- **`gemini-4-hydrogen` (`high` thinking level)**: Bounded structured assessments for `commodity_macro` and `weather_ag`.
 
 Model roles, effort levels, and strategy/risk parameters are frozen per generation via `GenerationConfig` (`tradingagents/strategies/config.py`). Production automated learning is disabled.
 

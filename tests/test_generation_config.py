@@ -191,6 +191,21 @@ def test_start_cli_accepts_optional_config_file(manager, profile, monkeypatch):
     assert manager.list_generations()[0].config_sha256 == hashlib.sha256(profile.read_bytes()).hexdigest()
 
 
+def test_start_cli_fails_closed_for_gemini_profile_without_credentials(manager, tmp_path, monkeypatch):
+    from scripts import run_generations
+    from tradingagents.strategies.orchestration import generation_manager as gm
+    gemini_profile = Path(__file__).resolve().parents[1] / 'config/profiles/gemini4-clean.json'
+    monkeypatch.setattr(gm, 'GenerationManager', lambda repo: manager)
+    monkeypatch.setattr('dotenv.load_dotenv', lambda: None)
+    monkeypatch.delenv('GEMINI_API_KEY', raising=False)
+    monkeypatch.delenv('GOOGLE_API_KEY', raising=False)
+    monkeypatch.setattr('sys.argv', ['run_generations.py', 'start', 'gemini-cutover', '--config-file', str(gemini_profile)])
+    with pytest.raises(SystemExit) as caught:
+        run_generations._main()
+    assert caught.value.code == 2
+    assert manager.list_generations() == []
+
+
 @pytest.mark.parametrize('status', ['success', 'runtime', 'malformed', 'timeout', 'launch_error'])
 def test_preflight_attempt_binds_only_validated_profile(manager, profile, monkeypatch, status):
     """Operational resolution can require the exact frozen profile on every attempt."""

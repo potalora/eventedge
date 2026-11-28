@@ -63,7 +63,8 @@ def release_rehearsal(tmp_path, monkeypatch):
         check=True, capture_output=True,
     )
     _git(repo, "checkout", "--detach", commit)
-    profile = repo / "config/profiles/gen003-clean.json"
+    monkeypatch.setenv("GEMINI_API_KEY", "offline-dummy")
+    profile = repo / "config/profiles/gemini4-clean.json"
     profile_bytes = profile.read_bytes()
 
     class Clock(datetime):

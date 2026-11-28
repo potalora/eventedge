@@ -430,18 +430,13 @@ def candidate_acceptance_payload(connection, issue: CandidateInputIssue, cohort_
 
 
 def validate_candidate_acceptance(
-    connection, issue: CandidateInputIssue, cohort_id: str, *, allow_legacy_report: bool = False
-) -> str | None:
+    connection, issue: CandidateInputIssue, cohort_id: str
+) -> str:
     validate_candidate_obligations(connection, issue)
     row = connection.execute(
         "SELECT metadata_value FROM schema_metadata WHERE metadata_key=?",
         (containment_key(issue, cohort_id),),
     ).fetchone()
-    if (allow_legacy_report and row is None and issue.dependency_kind == "volatility_history"
-            and issue.reason_code == "insufficient_history"):
-        # PR #76 reports predate acceptance records. Its canonical short-history
-        # check plus the obligation check above is not a fallback for any new reason.
-        return None
     expected = candidate_acceptance_payload(connection, issue, cohort_id)
     if row is None or row[0] != expected:
         raise ValueError("candidate containment acceptance missing or corrupt")

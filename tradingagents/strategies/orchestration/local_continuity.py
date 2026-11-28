@@ -13,9 +13,11 @@ from .trading_calendar import is_session, previous_session
 
 REQUIRED_CHECKS = ('accounting', 'staging', 'sources', 'screening', 'model_outcomes',
                    'committee', 'timeliness', 'report', 'replay', 'cleanup')
-_LUNA_MODELS = frozenset(('gpt-6-luna',))
-_SOL_MODELS = frozenset(('gpt-6.1-sol', 'gpt-6.2-sol'))
-EXPECTED_MODELS = _LUNA_MODELS | _SOL_MODELS
+_BOUNDED_MODELS = frozenset(('gpt-6-luna', 'gemini-4-hydrogen'))
+_FRONTIER_MODELS = frozenset(('gpt-6.1-sol', 'gpt-6.2-sol', 'gemini-4-neon'))
+_LUNA_MODELS = _BOUNDED_MODELS
+_SOL_MODELS = _FRONTIER_MODELS
+EXPECTED_MODELS = _BOUNDED_MODELS | _FRONTIER_MODELS
 _SUCCESS = frozenset(('success', 'success_empty', 'complete'))
 _FAILURE = frozenset(('failed', 'partial', 'invalid'))
 
@@ -25,7 +27,14 @@ def _identity(row):
                                          'profile_sha256', 'epoch_id'))
 
 
-def classify_session(observation, *, expected_commit, expected_profile):
+def classify_session(
+    observation,
+    *,
+    expected_commit,
+    expected_profile,
+    expected_bounded_models=None,
+    expected_frontier_models=None,
+):
     """Keep reduced scope, degraded holds and missing proof explicitly separate."""
     row = deepcopy(observation)
     checks = row.get('checks', {})
@@ -42,8 +51,11 @@ def classify_session(observation, *, expected_commit, expected_profile):
         reasons.append('candidate_identity')
     if type(row.get('attempts')) is not int or row['attempts'] != 1:
         reasons.append('live_attempt_count')
+    bounded_models = _BOUNDED_MODELS if expected_bounded_models is None else frozenset(expected_bounded_models)
+    frontier_models = _FRONTIER_MODELS if expected_frontier_models is None else frozenset(expected_frontier_models)
+    expected_models = bounded_models | frontier_models
     models = row.get('native_models', [])
-    if (type(models) is not list or any(model not in EXPECTED_MODELS for model in models)
+    if (type(models) is not list or any(model not in expected_models for model in models)
             or not models and checks.get('no_model_work_required') is not True):
         reasons.append('native_model_evidence')
     degraded = bool(row.get('unexpected_failures') or row.get('research_holds'))
@@ -57,7 +69,14 @@ def classify_session(observation, *, expected_commit, expected_profile):
     return row
 
 
-def summarize_continuity(records, *, through: date, required_sessions=5):
+def summarize_continuity(
+    records,
+    *,
+    through: date,
+    required_sessions=5,
+    expected_bounded_models=None,
+    expected_frontier_models=None,
+):
     """Require distinct consecutive calendar sessions and unchanged identities.
 
     Recovery means a failed live source becomes usable on a later qualifying
@@ -108,11 +127,14 @@ def summarize_continuity(records, *, through: date, required_sessions=5):
                                   'recovered_session': session.isoformat()})
                 del failed[provider]
     continuity = len(window) == required_sessions
+    bounded_models = _BOUNDED_MODELS if expected_bounded_models is None else frozenset(expected_bounded_models)
+    frontier_models = _FRONTIER_MODELS if expected_frontier_models is None else frozenset(expected_frontier_models)
+    expected_models = bounded_models | frontier_models
     observed_models = set(models)
     models_covered = (
-        observed_models <= EXPECTED_MODELS
-        and bool(observed_models & _LUNA_MODELS)
-        and bool(observed_models & _SOL_MODELS)
+        observed_models <= expected_models
+        and bool(observed_models & bounded_models)
+        and bool(observed_models & frontier_models)
     )
     return {'required_consecutive_sessions': required_sessions, 'through': through.isoformat(),
         'consecutive_qualifying_sessions': len(window),
