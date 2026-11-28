@@ -37,8 +37,9 @@ class TestAutoresearchConfig:
         assert isinstance(ar["proposals_per_strategy"], int)
         assert isinstance(ar["total_capital"], float)
         assert isinstance(ar["thesis_model"], str)
-        assert ar["thesis_model"] == "gpt-6.2-sol"
-        assert ar["portfolio_committee_model"] == "gpt-6.2-sol"
+        assert ar["thesis_model"] == "gemini-4-neon"
+        assert ar["portfolio_committee_model"] == "gemini-4-neon"
+        assert ar["bounded_model"] == "gemini-4-hydrogen"
 
     def test_config_is_copyable(self):
         import copy

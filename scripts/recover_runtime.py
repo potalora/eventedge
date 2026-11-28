@@ -399,6 +399,20 @@ def tick(repo, now, *, launcher=launch, reporter=_report_only, discover=_discove
                 record.get('disposition') == 'retrying' or record.get('running')
                 for record in journal['incidents'].values()
             )
+            from tradingagents.strategies.orchestration.generation_config import (
+                missing_gemini_credentials,
+                read_generation_config,
+            )
+            for row in rows:
+                config_file = row.get('config_file')
+                if isinstance(config_file, str) and config_file and Path(config_file).is_file():
+                    _, overlay, _ = read_generation_config(config_file, row.get('config_sha256'))
+                    if missing_gemini_credentials(overlay):
+                        projection = status_projection(journal, clock(), active_ids=by_id)
+                        projection['status'] = 'operator_required'
+                        projection['controller_reason_code'] = 'auth_required'
+                        atomic_json(status_path, projection)
+                        return projection
             if not has_pending and not due and not _has_unrecorded_missed_session(rows, journal, today):
                 # Short-circuit idle ticks: 0 git forks, 0 SQLite opens, 0 fsync writes.
                 projection = status_projection(journal, now, active_ids=by_id)

@@ -150,6 +150,41 @@ def _run_explicit_comparison(manager, pairs: tuple) -> dict[str, object]:
             ledger.close()
 
 
+def _completed_sessions(run_history: list[dict] | None) -> int:
+    """Count distinct non-failed daily sessions recorded in a generation's run_history."""
+    if not run_history:
+        return 0
+    completed_dates: set[str] = set()
+    undated = 0
+    for entry in run_history:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("outcome") == "failed" or entry.get("success") is False:
+            continue
+        day = entry.get("date")
+        if isinstance(day, str) and day.strip():
+            completed_dates.add(day.strip())
+        else:
+            undated += 1
+    return len(completed_dates) + undated
+
+
+def _check_two_gen_circuit_breaker(
+    generations: list,
+) -> tuple[tuple[str, int], tuple[str, int]] | None:
+    """Return the last two (gen_id, completed_sessions) if both have <=1 session."""
+    if len(generations) < 2:
+        return None
+    recent = []
+    for gen in generations[-2:]:
+        gen_id = gen["gen_id"] if isinstance(gen, Mapping) else gen.gen_id
+        history = gen.get("run_history", []) if isinstance(gen, Mapping) else gen.run_history
+        recent.append((str(gen_id), _completed_sessions(history)))
+    if recent[0][1] <= 1 and recent[1][1] <= 1:
+        return recent[0], recent[1]
+    return None
+
+
 def _print_run_evidence(result: dict) -> None:
     """Show bounded diagnostics without reinterpreting the worker's outcome."""
     failures = result.get("governed_failure_map", {})
@@ -173,6 +208,12 @@ def _main():
     p_start = sub.add_parser("start", help="Start a new generation from current HEAD")
     p_start.add_argument("description", help="Description of this generation")
     p_start.add_argument("--config-file", default=None, help="Freeze a secret-free JSON configuration overlay for this generation")
+    p_start.add_argument(
+        "--force-circuit-breaker",
+        action="store_true",
+        default=False,
+        help="Override the 2-generation single-session churn circuit breaker",
+    )
 
     # run-daily
     p_daily = sub.add_parser("run-daily", help="Run all active generations for a date")
@@ -282,6 +323,34 @@ def _main():
         _exit_runtime_lock_error(error)
 
     if args.command == "start":
+        from tradingagents.strategies.config import GenerationConfig
+        from tradingagents.strategies.orchestration.generation_config import (
+            missing_gemini_credentials,
+            read_generation_config,
+        )
+
+        if args.config_file is not None:
+            _, target_config, _ = read_generation_config(args.config_file)
+        else:
+            target_config = GenerationConfig()
+        if missing_gemini_credentials(target_config):
+            print(
+                "Error: GEMINI_API_KEY (or GOOGLE_API_KEY) is required to start a Gemini generation.",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        if not args.force_circuit_breaker:
+            tripped = _check_two_gen_circuit_breaker(manager.list_generations())
+            if tripped is not None:
+                (g1, c1), (g2, c2) = tripped
+                print(
+                    f"Error: 2-generation churn circuit breaker tripped — last two generations "
+                    f"({g1}: {c1} completed session(s), {g2}: {c2} completed session(s)) each "
+                    f"have <= 1 completed session. Diagnose the shared fault boundary before "
+                    f"cutting another generation, or pass --force-circuit-breaker to override.",
+                    file=sys.stderr,
+                )
+                raise SystemExit(2)
         gen = (manager.start_generation(args.description) if args.config_file is None else
                manager.start_generation(args.description, config_file=args.config_file))
         print(f"Started {gen.gen_id}")

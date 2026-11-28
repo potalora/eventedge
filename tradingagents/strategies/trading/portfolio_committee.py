@@ -115,7 +115,7 @@ class PortfolioCommittee:
         pt_config = self.config.get("autoresearch", {}).get("paper_trade", {})
         self._model_name = pt_config.get(
             "portfolio_committee_model",
-            self.config.get("autoresearch", {}).get("autoresearch_model", "gpt-6.2-sol"),
+            self.config.get("autoresearch", {}).get("autoresearch_model", "gemini-4-neon"),
         )
         self._effort = pt_config.get("portfolio_committee_effort", self.config.get("autoresearch", {}).get("llm_effort", "high"))
         self._enabled = pt_config.get("portfolio_committee_enabled", True)
@@ -1178,6 +1178,7 @@ Synthesize into ranked trade list. Return JSON array."""
     ) -> list[TradeRecommendation] | None:
         """Parse LLM JSON response into TradeRecommendation list."""
         # Strip markdown fences
+        text = text.strip()
         if text.startswith("```"):
             lines = text.split("\n")
             lines = [line for line in lines if not line.strip().startswith("```")]
@@ -1235,8 +1236,12 @@ Synthesize into ranked trade list. Return JSON array."""
                 self._client = plan_client
                 return self._client
             try:
-                from tradingagents.strategies.llm_utils import uses_responses
-                if uses_responses(self._model_name):
+                from tradingagents.strategies.llm_utils import GeminiClient, model_provider
+                provider = model_provider(self._model_name)
+                if provider == "gemini":
+                    self._client = GeminiClient.from_env()
+                    return self._client
+                if provider == "openai":
                     import httpx
                     from openai import OpenAI
                     self._client = OpenAI(
@@ -1291,7 +1296,7 @@ Synthesize into ranked trade list. Return JSON array."""
                 raise
             except Exception as exc:
                 status = getattr(exc, "status_code", None)
-                if status in {429, 529} and attempt < 4:
+                if status in {429, 503, 529} and attempt < 4:
                     model_backoff(2.0 * 2 ** attempt)
                     continue
                 raise

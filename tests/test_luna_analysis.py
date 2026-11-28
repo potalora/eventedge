@@ -80,13 +80,13 @@ def test_committee_model_override_keeps_claude_route(luna_config):
     assert client.messages.create.call_args.kwargs["model"] == "claude-haiku-4-5-20251001"
 
 
-def test_defaults_separate_bounded_luna_from_frontier_thesis_and_committee():
-    assert DEFAULT_CONFIG["autoresearch"]["autoresearch_model"] == "gpt-6-luna"
+def test_defaults_separate_bounded_hydrogen_from_frontier_neon_thesis_and_committee():
+    assert DEFAULT_CONFIG["autoresearch"]["autoresearch_model"] == "gemini-4-hydrogen"
     assert DEFAULT_CONFIG["autoresearch"]["llm_effort"] == "high"
-    assert LLMAnalyzer(DEFAULT_CONFIG)._model_name == "gpt-6-luna"
-    assert DEFAULT_CONFIG["autoresearch"]["thesis_model"] == "gpt-6.2-sol"
+    assert LLMAnalyzer(DEFAULT_CONFIG)._model_name == "gemini-4-hydrogen"
+    assert DEFAULT_CONFIG["autoresearch"]["thesis_model"] == "gemini-4-neon"
     assert DEFAULT_CONFIG["autoresearch"]["thesis_effort"] == "high"
-    assert PortfolioCommittee(DEFAULT_CONFIG)._model_name == "gpt-6.2-sol"
+    assert PortfolioCommittee(DEFAULT_CONFIG)._model_name == "gemini-4-neon"
     assert PortfolioCommittee(DEFAULT_CONFIG)._effort == "high"
 
 
@@ -94,6 +94,10 @@ def test_defaults_separate_bounded_luna_from_frontier_thesis_and_committee():
 def test_next_candidate_role_requests_retain_configured_and_returned_model_provenance(role, expected_model):
     api_config = deepcopy(DEFAULT_CONFIG)
     api_config["autoresearch"]["llm_billing_mode"] = "api"
+    api_config["autoresearch"]["bounded_model"] = "gpt-6-luna"
+    api_config["autoresearch"]["autoresearch_model"] = "gpt-6-luna"
+    api_config["autoresearch"]["thesis_model"] = "gpt-6.2-sol"
+    api_config["autoresearch"]["paper_trade"]["portfolio_committee_model"] = "gpt-6.2-sol"
     obj = PortfolioCommittee(api_config) if role == "committee" else LLMAnalyzer(api_config)
     client = MagicMock()
     def create(**request):

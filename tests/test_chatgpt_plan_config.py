@@ -85,9 +85,10 @@ def test_plan_descriptor_is_safe_to_share_in_parallel_fork(plan_boundary):
     assert fork.last_call_provenance is not obj.last_call_provenance
 
 
-def test_default_billing_mode_is_chatgpt_plan():
+def test_default_billing_mode_is_api():
     from tradingagents.default_config import DEFAULT_CONFIG
-    assert DEFAULT_CONFIG['autoresearch']['llm_billing_mode'] == 'chatgpt_plan'
+    assert DEFAULT_CONFIG['autoresearch']['llm_billing_mode'] == 'api'
+    assert DEFAULT_CONFIG['autoresearch']['chatgpt_plan_auth_path'] is None
 
 
 @pytest.mark.parametrize('base,thesis,supported', [

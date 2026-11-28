@@ -4,9 +4,9 @@
     "GOOG"
   ],
   "bounded_effort": "high",
-  "bounded_model": "gpt-6-luna",
+  "bounded_model": "gemini-4-hydrogen",
   "candidate_analysis_workers": 32,
-  "chatgpt_plan_auth_path": "/opt/data/private/eventedge/credentials/plan-auth.json",
+  "chatgpt_plan_auth_path": null,
   "enabled_strategies": [
     "earnings_call",
     "supply_chain",
@@ -43,7 +43,7 @@
     "rate_delay_s": 1.1,
     "workflow_budget_s": 240.0
   },
-  "llm_billing_mode": "chatgpt_plan",
+  "llm_billing_mode": "api",
   "paper_ledger": {
     "bar_max_age_hours": 24,
     "benchmark_symbols": [
@@ -65,7 +65,7 @@
     "slippage_bps": "10"
   },
   "portfolio_committee_effort": "high",
-  "portfolio_committee_model": "gpt-6.2-sol",
+  "portfolio_committee_model": "gemini-4-neon",
   "portfolio_policy": {
     "annualized_volatility_floor": 0.15,
     "max_open_chase_pct": 0.05,
@@ -99,6 +99,6 @@
     "hard_to_borrow_si_pct": 30
   },
   "thesis_effort": "high",
-  "thesis_model": "gpt-6.2-sol",
+  "thesis_model": "gemini-4-neon",
   "total_capital": 5000.0
 }

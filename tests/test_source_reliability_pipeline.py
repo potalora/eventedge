@@ -363,7 +363,7 @@ def pipeline(monkeypatch, tmp_path):
     from tradingagents.strategies.data_sources import request_policy
     monkeypatch.setattr(request_policy, "PROVIDER_LIMITS", {})
     monkeypatch.setattr(request_policy.time, "sleep", lambda _: None)
-    for key in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for key in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.setenv(key, "offline-dummy")
 
     class FixedDatetime(datetime):

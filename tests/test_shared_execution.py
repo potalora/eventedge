@@ -362,7 +362,7 @@ def exact_supported_owner(pipeline, monkeypatch):
     from tradingagents.strategies.orchestration.cohort_orchestrator import CohortOrchestrator, build_default_cohorts
     from test_source_reliability_pipeline import GENERATION, COMMIT
     fixture, historical, base, repo = prospective(pipeline, monkeypatch)
-    profile = Path(__file__).parents[1] / 'config/profiles/gen003-clean.json'
+    profile = Path(__file__).parents[1] / 'config/profiles/gemini4-clean.json'
     digest = hashlib.sha256(profile.read_bytes()).hexdigest()
     config = apply_generation_config(base, profile, digest)
     ar = config['autoresearch']

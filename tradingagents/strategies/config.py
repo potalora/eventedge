@@ -747,14 +747,14 @@ class GenerationConfig:
     """Single canonical, strictly validated generation configuration contract."""
 
     enabled_strategies: tuple[str, ...] = ACTIVE_STRATEGIES
-    llm_billing_mode: str = "chatgpt_plan"
-    thesis_model: str = "gpt-6.2-sol"
+    llm_billing_mode: str = "api"
+    thesis_model: str = "gemini-4-neon"
     thesis_effort: str = "high"
-    portfolio_committee_model: str = "gpt-6.2-sol"
+    portfolio_committee_model: str = "gemini-4-neon"
     portfolio_committee_effort: str = "high"
-    bounded_model: str = "gpt-6-luna"
+    bounded_model: str = "gemini-4-hydrogen"
     bounded_effort: str = "high"
-    chatgpt_plan_auth_path: str | None = "/opt/data/private/eventedge/credentials/plan-auth.json"
+    chatgpt_plan_auth_path: str | None = None
     blocked_tickers: tuple[str, ...] = ("GOOGL", "GOOG")
     candidate_analysis_workers: int = 32
     proposals_per_strategy: int = 3

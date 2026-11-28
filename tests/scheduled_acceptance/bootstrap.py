@@ -45,10 +45,7 @@ def _forbidden_native(*args, **kwargs):
     raise AssertionError('scheduled acceptance forbids native curl network transport')
 
 
-def _model_text(request):
-    system = request['instructions']
-    content = request['input'][0]['content']
-    prompt = content if isinstance(content, str) else content[0]['text']
+def _model_text(*, model, system, prompt, effort):
     if 'portfolio manager' in system:
         section = prompt.split('Signals (all ', 1)[1].split('Current positions', 1)[0]
         admitted = [json.loads(line[line.index('{'):]) for line in section.splitlines() if line.startswith('  ') and '{' in line]
@@ -80,7 +77,7 @@ def _model_text(request):
             'evidence_claim': 'Quarterly earnings exceed forecast with raised guidance',
         }
         role = 'analysis'
-    trace('model', role=role, model=request['model'], effort=request['reasoning']['effort'], session=scenario()['session'])
+    trace('model', role=role, model=model, effort=effort, session=scenario()['session'])
     return json.dumps(value)
 
 
@@ -319,27 +316,60 @@ def _install():
     yfinance.Ticker.info = property(get_info)
 
     def model_response(http_module, request):
-        if request.url.host != 'api.openai.com' or request.url.path != '/v1/responses':
+        path = request.url.path
+        if (
+            request.url.host != 'generativelanguage.googleapis.com'
+            or not path.startswith('/v1beta/models/')
+            or not path.endswith(':generateContent')
+        ):
             trace('unexpected_httpx', url=str(request.url))
             raise AssertionError('unconfigured HTTPX endpoint')
+        api_key = request.headers.get('x-goog-api-key', '')
+        assert isinstance(api_key, str) and api_key.strip(), 'missing x-goog-api-key header'
+        assert 'key' not in request.url.params, 'API key must never appear in query string'
+        model = path[len('/v1beta/models/'):-len(':generateContent')]
         value = json.loads(request.content)
-        text = _model_text(value)
+        gen_cfg = value.get('generationConfig')
+        assert isinstance(gen_cfg, dict), 'missing generationConfig'
+        assert not ({'temperature', 'topP', 'topK'} & set(gen_cfg)), (
+            f'deprecated Gemini 4 sampling params sent: {sorted(gen_cfg)}'
+        )
+        max_output_tokens = gen_cfg.get('maxOutputTokens')
+        assert type(max_output_tokens) is int and max_output_tokens >= 65535, (
+            f'maxOutputTokens must be >= 65535, got {max_output_tokens!r}'
+        )
+        thinking_cfg = gen_cfg.get('thinkingConfig')
+        assert isinstance(thinking_cfg, dict), 'missing thinkingConfig'
+        assert 'thinkingBudget' not in thinking_cfg, 'deprecated thinkingBudget sent to Gemini 4'
+        effort = thinking_cfg.get('thinkingLevel')
+        assert effort in {'low', 'medium', 'high', 'xhigh'}, f'invalid thinkingLevel: {effort!r}'
+        system_parts = (value.get('systemInstruction') or {}).get('parts') or []
+        system = ''.join(part.get('text', '') for part in system_parts if isinstance(part, dict))
+        prompt_parts = value['contents'][0]['parts']
+        prompt = ''.join(part.get('text', '') for part in prompt_parts if isinstance(part, dict))
+        text = _model_text(model=model, system=system, prompt=prompt, effort=effort)
         response = {
-            'id': 'resp_acceptance',
-            'model': value['model'],
-            'status': 'completed',
-            'output': [
+            'responseId': 'resp_acceptance',
+            'modelVersion': model,
+            'candidates': [
                 {
-                    'id': 'msg_acceptance',
-                    'type': 'message',
-                    'role': 'assistant',
-                    'status': 'completed',
-                    'content': [{'type': 'output_text', 'text': text, 'annotations': []}],
+                    'finishReason': 'STOP',
+                    'content': {
+                        'role': 'model',
+                        'parts': [
+                            {'thought': True, 'text': 'internal acceptance thought'},
+                            {'text': text},
+                        ],
+                    },
                 }
             ],
         }
-        body = 'data: ' + json.dumps({'type': 'response.completed', 'response': response}) + '\n\n'
-        return http_module.Response(200, headers={'content-type': 'text/event-stream'}, content=body.encode(), request=request)
+        return http_module.Response(
+            200,
+            headers={'content-type': 'application/json'},
+            content=json.dumps(response).encode(),
+            request=request,
+        )
 
     httpx.HTTPTransport.handle_request = lambda transport, request: model_response(httpx, request)
     # Current OpenAI SDKs can use the independently named HTTPX2 transport.
